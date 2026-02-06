@@ -1,0 +1,54 @@
+# FastAPI and ASGI
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+
+# Database
+sqlalchemy[asyncio]==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+
+# Validation
+pydantic==2.6.1
+pydantic-settings==2.1.0
+email-validator==2.1.0
+
+# Background Tasks
+celery[redis]==5.3.6
+redis==5.0.1
+
+# HTTP Client (for scrapers)
+httpx==0.26.0
+
+# HTML Parsing (for scrapers)
+beautifulsoup4==4.12.3
+lxml==5.1.0
+
+# PDF Processing (for CV parsing)
+pdfplumber==0.10.4
+
+# Firebase (for push notifications)
+firebase-admin==6.4.0
+
+# Email
+aiosmtplib==3.0.1
+
+# Utilities
+python-dotenv==1.0.1
+
+# Development
+pytest==8.0.0
+pytest-asyncio==0.23.4
+httpx==0.26.0
+black==24.1.1
+ruff==0.2.0
+mypy==1.8.0
+
+# Type stubs
+types-passlib==1.7.7.20240106
+types-python-jose==3.3.4.20240106
