@@ -55,13 +55,3 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         timestamp=datetime.now(timezone.utc).isoformat(),
         checks=checks,
     )
-
-
-@router.get("/")
-async def root():
-    """Root endpoint."""
-    return {
-        "name": settings.app_name,
-        "version": settings.app_version,
-        "docs": "/docs",
-    }

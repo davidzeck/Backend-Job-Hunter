@@ -1,32 +1,46 @@
 """
 Celery Beat scheduler configuration.
 
-Defines periodic tasks for scraping job sources.
+Defines periodic tasks that run on a schedule:
+- Health checks every 5 minutes
+- Scrape all due sources every 15 minutes
+- Cleanup old logs daily
+
+WHY Celery Beat instead of cron?
+- Beat is declarative (defined in Python, not crontab files)
+- Beat respects task routing (scrape tasks go to scrape queue)
+- Beat is version-controlled with the code
+- Beat runs inside Docker, no host system dependency
 """
+import asyncio
+
 from celery.schedules import crontab
 
 from app.workers.celery_app import celery_app
+from app.core.database import async_session_maker
 
-# Periodic task schedule
+
+def run_async(coro):
+    """Helper to run async code in sync Celery tasks."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+# ─── Periodic Task Schedule ────────────────────────────────────
+
 celery_app.conf.beat_schedule = {
-    # Health check - every 5 minutes
     "check-scraper-health": {
         "task": "app.workers.scheduler.check_scraper_health",
         "schedule": crontab(minute="*/5"),
     },
-
-    # Note: Individual source scraping is configured dynamically
-    # based on each source's scrape_interval_minutes setting.
-    # See the scrape_all_active_sources task below.
-
-    # Scrape all active sources - every 15 minutes
-    # This task will respect each source's individual interval
     "scrape-all-sources": {
         "task": "app.workers.scheduler.scrape_all_active_sources",
         "schedule": crontab(minute="*/15"),
     },
-
-    # Cleanup old scrape logs - daily at 3 AM
     "cleanup-old-logs": {
         "task": "app.workers.scheduler.cleanup_old_scrape_logs",
         "schedule": crontab(hour=3, minute=0),
@@ -34,116 +48,75 @@ celery_app.conf.beat_schedule = {
 }
 
 
+# ─── Scheduled Tasks ──────────────────────────────────────────
+
 @celery_app.task
 def check_scraper_health():
-    """
-    Check health of all scrapers and send alerts if needed.
-    """
-    import asyncio
-    from sqlalchemy import select
-    from app.core.database import async_session_maker
-    from app.models.job_source import JobSource
+    """Check health of all scrapers and alert if any are failing."""
+    return run_async(_check_scraper_health())
 
-    async def _check():
-        async with async_session_maker() as db:
-            result = await db.execute(
-                select(JobSource).where(JobSource.health_status == "failing")
-            )
-            failing_sources = result.scalars().all()
 
-            if failing_sources:
-                # TODO: Send alert to admin
-                print(f"WARNING: {len(failing_sources)} scrapers are failing!")
-                for source in failing_sources:
-                    print(f"  - Source {source.id}: {source.consecutive_failures} failures")
+async def _check_scraper_health():
+    from app.repositories.source_repository import SourceRepository
 
-            return {"failing_count": len(failing_sources)}
+    source_repo = SourceRepository()
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_check())
-    finally:
-        loop.close()
+    async with async_session_maker() as db:
+        failing = await source_repo.get_failing_sources(db)
+
+        if failing:
+            # TODO: Send alert to admin (email, Slack, etc.)
+            print(f"WARNING: {len(failing)} scrapers are failing!")
+            for source in failing:
+                print(f"  - Source {source.id}: {source.consecutive_failures} failures")
+
+        return {"failing_count": len(failing)}
 
 
 @celery_app.task
 def scrape_all_active_sources():
     """
     Trigger scraping for all active sources that are due.
+
+    This is the orchestrator. It doesn't scrape itself - it dispatches
+    individual scrape_source tasks. This is the fan-out pattern:
+    one scheduler task -> N scraper tasks running in parallel.
     """
-    import asyncio
-    from datetime import datetime, timezone, timedelta
-    from sqlalchemy import select, or_
-    from app.core.database import async_session_maker
-    from app.models.job_source import JobSource
+    return run_async(_scrape_all_active_sources())
+
+
+async def _scrape_all_active_sources():
+    from app.services.scrape_service import ScrapeService
     from app.workers.tasks import scrape_source
 
-    async def _scrape_all():
-        async with async_session_maker() as db:
-            now = datetime.now(timezone.utc)
+    scrape_service = ScrapeService()
 
-            # Find sources that are:
-            # 1. Active
-            # 2. Either never scraped, or due based on their interval
-            result = await db.execute(
-                select(JobSource).where(
-                    JobSource.is_active == True,
-                    or_(
-                        JobSource.last_scraped_at.is_(None),
-                        JobSource.last_scraped_at < now - timedelta(minutes=15),
-                    ),
-                )
-            )
-            sources = result.scalars().all()
+    async with async_session_maker() as db:
+        due_source_ids = await scrape_service.get_due_sources(db)
 
-            triggered = 0
-            for source in sources:
-                # Check if enough time has passed based on source's interval
-                if source.last_scraped_at:
-                    interval = timedelta(minutes=source.scrape_interval_minutes)
-                    if now - source.last_scraped_at < interval:
-                        continue
+        for source_id in due_source_ids:
+            scrape_source.delay(source_id)
 
-                # Trigger scrape
-                scrape_source.delay(str(source.id))
-                triggered += 1
-
-            return {"triggered": triggered}
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_scrape_all())
-    finally:
-        loop.close()
+        return {"triggered": len(due_source_ids)}
 
 
 @celery_app.task
 def cleanup_old_scrape_logs():
-    """
-    Delete scrape logs older than 30 days.
-    """
-    import asyncio
+    """Delete scrape logs older than 30 days to prevent table bloat."""
+    return run_async(_cleanup_old_scrape_logs())
+
+
+async def _cleanup_old_scrape_logs():
     from datetime import datetime, timezone, timedelta
     from sqlalchemy import delete
-    from app.core.database import async_session_maker
     from app.models.scrape_log import ScrapeLog
 
-    async def _cleanup():
-        async with async_session_maker() as db:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    async with async_session_maker() as db:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
-            result = await db.execute(
-                delete(ScrapeLog).where(ScrapeLog.created_at < cutoff)
-            )
-            await db.commit()
+        result = await db.execute(
+            delete(ScrapeLog).where(ScrapeLog.created_at < cutoff)
+        )
+        await db.commit()
 
-            return {"deleted": result.rowcount}
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_cleanup())
-    finally:
-        loop.close()
+        return {"deleted": result.rowcount}

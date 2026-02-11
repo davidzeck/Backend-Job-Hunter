@@ -46,8 +46,9 @@ class ScrapeLog(BaseModel):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_traceback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Additional metadata
-    metadata: Mapped[Optional[dict]] = mapped_column(
+    # Additional metadata (named extra_data because 'metadata' is reserved by SQLAlchemy)
+    extra_data: Mapped[Optional[dict]] = mapped_column(
+        "extra_data",
         JSONB,
         nullable=True,
     )  # Response codes, retries, etc.

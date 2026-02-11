@@ -59,7 +59,7 @@ async def api_exception_handler(request: Request, exc: APIException):
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "error": exc.error_code,
+            "error": exc.code,
             "message": exc.message,
             "details": exc.details,
         },
