@@ -1,10 +1,10 @@
 """
 Celery tasks for background processing.
 
-ARCHITECTURE RULE: Same as routes - tasks are thin entry points.
+ARCHITECTURE RULE: Same as routes — tasks are thin entry points.
 They do exactly 3 things:
   1. Create a DB session (since we're outside FastAPI's request cycle)
-  2. Call a service method
+  2. Call a service method  (or inline simple logic for CV processing)
   3. Return the result
 
 NO raw SQL queries. NO business logic. NO model imports (except through services).
@@ -89,46 +89,199 @@ async def _notify_matching_users(job_id: str):
         return await notification_service.notify_for_new_job(db, job_id)
 
 
-@celery_app.task(bind=True, max_retries=2)
+# ── CV Processing ─────────────────────────────────────────────────────────────
+
+@celery_app.task(bind=True, max_retries=2, queue="cv_processing")
 def process_cv(self, user_id: str, cv_id: str):
     """
-    Process an uploaded CV and extract skills.
+    Process an uploaded CV: extract text with pdfplumber, match skills from taxonomy.
 
-    TODO: Implement CV text extraction with pdfplumber
-    and skill matching against a skills taxonomy.
+    Pipeline:
+      1. Mark status = processing
+      2. Stream PDF bytes from S3
+      3. Extract text with pdfplumber
+      4. Match skills against SKILLS_TAXONOMY keyword dict
+      5. Replace UserSkill records for this CV
+      6. Mark status = ready
+
+    On failure, marks status = failed and retries up to max_retries times
+    with exponential back-off.
 
     Args:
-        user_id: UUID of the user
-        cv_id: UUID of the CV record
+        user_id: UUID of the user (ownership check)
+        cv_id:   UUID of the UserCV record
     """
     return run_async(_process_cv(user_id, cv_id))
 
 
 async def _process_cv(user_id: str, cv_id: str):
-    """Async implementation - placeholder for CV processing."""
+    """Async implementation of CV processing."""
+    import io
+    import uuid as _uuid
     from datetime import datetime, timezone
-    from sqlalchemy import select
-    from app.models.user_cv import UserCV
+
+    import pdfplumber
+    from sqlalchemy import select, delete
+
+    from app.core import storage
+    from app.models.user_cv import (
+        UserCV,
+        UPLOAD_STATUS_PROCESSING,
+        UPLOAD_STATUS_READY,
+        UPLOAD_STATUS_FAILED,
+    )
+    from app.models.user_skill import UserSkill
 
     async with async_session_maker() as db:
+        # ── 1. Fetch CV record ────────────────────────────────────────────────
         result = await db.execute(
             select(UserCV).where(
-                UserCV.id == cv_id,
-                UserCV.user_id == user_id,
+                UserCV.id == _uuid.UUID(cv_id),
+                UserCV.user_id == _uuid.UUID(user_id),
+                UserCV.is_active == True,
             )
         )
         cv = result.scalar_one_or_none()
-
         if not cv:
-            return {"error": "CV not found"}
+            return {"error": "CV not found", "cv_id": cv_id}
 
-        # TODO: Implement actual processing:
-        # 1. Read PDF with pdfplumber
-        # 2. Extract text
-        # 3. Match skills against taxonomy
-        # 4. Save UserSkill records
-
-        cv.processed_at = datetime.now(timezone.utc)
+        cv.upload_status = UPLOAD_STATUS_PROCESSING
         await db.commit()
 
-        return {"cv_id": cv_id, "status": "processed"}
+        try:
+            # ── 2. Download PDF from S3 ───────────────────────────────────────
+            pdf_bytes = await storage.download_bytes(cv.s3_key)
+
+            # ── 3. Extract text via pdfplumber ────────────────────────────────
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                text = "\n".join(
+                    page.extract_text() or "" for page in pdf.pages
+                )
+
+            text_lower = text.lower()
+
+            # ── 4. Keyword skill matching ─────────────────────────────────────
+            extracted = _extract_skills_from_text(text_lower)
+
+            # ── 5. Replace skills for this CV ─────────────────────────────────
+            await db.execute(
+                delete(UserSkill).where(UserSkill.cv_id == cv.id)
+            )
+            for skill_name, skill_category in extracted:
+                db.add(
+                    UserSkill(
+                        user_id=cv.user_id,
+                        cv_id=cv.id,
+                        skill_name=skill_name,
+                        skill_category=skill_category,
+                        source="cv",
+                    )
+                )
+
+            # ── 6. Mark ready ─────────────────────────────────────────────────
+            cv.upload_status = UPLOAD_STATUS_READY
+            cv.processed_at = datetime.now(timezone.utc)
+            await db.commit()
+
+            return {
+                "cv_id": cv_id,
+                "status": "ready",
+                "skills_extracted": len(extracted),
+            }
+
+        except Exception as exc:  # noqa: BLE001
+            cv.upload_status = UPLOAD_STATUS_FAILED
+            await db.commit()
+            # Re-raise so Celery can retry with exponential back-off
+            raise exc
+
+
+def _extract_skills_from_text(text_lower: str) -> list[tuple[str, str]]:
+    """
+    Simple keyword-in-text skill extraction against SKILLS_TAXONOMY.
+
+    Returns a list of (skill_name, category) tuples for every taxonomy entry
+    found in the CV text.  Tier 2 replaces this with vector similarity search.
+    """
+    found = []
+    for category, skills in SKILLS_TAXONOMY.items():
+        for skill in skills:
+            if skill.lower() in text_lower:
+                found.append((skill, category))
+    return found
+
+
+# ── Skills taxonomy ───────────────────────────────────────────────────────────
+# category → list of canonical skill names (matching is case-insensitive substring search)
+SKILLS_TAXONOMY: dict[str, list[str]] = {
+    "languages": [
+        "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "Swift",
+        "Go", "Rust", "C++", "C#", "C", "Ruby", "PHP", "Scala", "R",
+        "Dart", "Elixir", "Haskell", "Clojure", "Lua", "Perl", "MATLAB",
+        "Bash", "PowerShell", "SQL", "HTML", "CSS", "Sass", "SCSS",
+    ],
+    "frontend": [
+        "React", "Vue", "Angular", "Next.js", "Nuxt", "Svelte", "SvelteKit",
+        "Redux", "MobX", "Zustand", "Tailwind CSS", "Bootstrap", "Material UI",
+        "Chakra UI", "Ant Design", "Storybook", "Webpack", "Vite", "Rollup",
+        "Babel", "ESLint", "Prettier", "Jest", "Cypress", "Playwright",
+        "Three.js", "D3.js", "Chart.js", "WebGL", "WebRTC", "WebSockets",
+        "PWA", "Service Workers", "Web Components",
+    ],
+    "backend": [
+        "FastAPI", "Django", "Flask", "Express", "NestJS", "Spring Boot",
+        "Laravel", "Rails", "Gin", "Echo", "Fiber", "ASP.NET Core",
+        "GraphQL", "REST", "gRPC", "OAuth2", "JWT",
+        "OpenAPI", "Swagger", "Celery", "RabbitMQ", "Kafka", "SQS",
+        "Bull", "BullMQ", "Dramatiq", "Pydantic", "SQLAlchemy", "Prisma",
+        "TypeORM", "Sequelize", "Mongoose", "Hibernate", "GORM",
+    ],
+    "databases": [
+        "PostgreSQL", "MySQL", "SQLite", "MariaDB", "Oracle",
+        "MongoDB", "Redis", "Cassandra", "DynamoDB", "CosmosDB",
+        "Elasticsearch", "OpenSearch", "InfluxDB", "TimescaleDB",
+        "Neo4j", "Dgraph", "Fauna", "Supabase", "PlanetScale",
+        "pgvector", "Pinecone", "Qdrant", "Weaviate", "Chroma", "Milvus",
+        "Firestore",
+    ],
+    "cloud": [
+        "AWS", "GCP", "Azure", "Cloudflare", "DigitalOcean", "Heroku",
+        "Vercel", "Netlify", "Railway", "Render",
+        "S3", "EC2", "Lambda", "ECS", "EKS", "Fargate", "CloudFront",
+        "RDS", "Aurora", "SageMaker", "Bedrock",
+        "Cloud Run", "Cloud Functions", "BigQuery",
+        "App Service", "Azure Functions",
+    ],
+    "devops": [
+        "Docker", "Kubernetes", "Helm", "Terraform", "Ansible", "Pulumi",
+        "GitHub Actions", "GitLab CI", "CircleCI", "Jenkins", "ArgoCD",
+        "Prometheus", "Grafana", "Datadog", "New Relic", "Sentry",
+        "ELK Stack", "Kibana", "Logstash", "Fluentd", "OpenTelemetry",
+        "Nginx", "Traefik", "Istio", "Envoy", "Linkerd",
+        "Linux",
+    ],
+    "mobile": [
+        "Flutter", "React Native", "SwiftUI",
+        "Jetpack Compose", "Xamarin", "Ionic", "Capacitor",
+        "Android SDK", "iOS SDK", "Expo", "Firebase",
+    ],
+    "ai_ml": [
+        "Machine Learning", "Deep Learning", "NLP", "Computer Vision",
+        "PyTorch", "TensorFlow", "Keras", "Scikit-learn", "XGBoost",
+        "LangChain", "LlamaIndex", "OpenAI", "Anthropic", "Hugging Face",
+        "Transformers", "BERT", "GPT", "RAG", "Vector Search", "Embeddings",
+        "pandas", "NumPy", "Matplotlib", "Seaborn", "Plotly",
+        "Jupyter", "MLflow",
+    ],
+    "testing": [
+        "Unit Testing", "Integration Testing", "End-to-End Testing",
+        "TDD", "BDD", "Pytest", "Jest", "Mocha", "Chai",
+        "Playwright", "Cypress", "Selenium", "Postman",
+        "k6", "Locust", "JMeter",
+    ],
+    "soft_skills": [
+        "Agile", "Scrum", "Kanban", "JIRA", "Confluence",
+        "Technical Writing", "Code Review", "Pair Programming",
+        "Mentoring", "System Design",
+    ],
+}

@@ -32,6 +32,9 @@ lxml==5.1.0
 # PDF Processing (for CV parsing)
 pdfplumber==0.10.4
 
+# Object Storage (S3 / MinIO)
+aioboto3==13.3.0
+
 # Firebase (for push notifications)
 firebase-admin==6.4.0
 

@@ -59,6 +59,7 @@ class UserResponse(UserBase, IDSchema, TimestampSchema):
 
     email_verified: bool
     is_active: bool
+    is_admin: bool = False
     preferences: dict
     last_seen_at: Optional[datetime] = None
 

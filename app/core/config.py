@@ -56,9 +56,22 @@ class Settings(BaseSettings):
     scrape_timeout_seconds: int = 30
     scrape_rate_limit_per_minute: int = 10
 
-    # File Storage
+    # File Storage (legacy local dir — kept for backward compat during transition)
     upload_dir: str = "./uploads"
     max_cv_size_mb: int = 5
+
+    # S3 / MinIO Object Storage
+    s3_endpoint_url: Optional[str] = None   # None = real AWS; "http://localhost:9000" = MinIO
+    s3_bucket_name: str = "jobscout-cvs"
+    s3_aws_access_key_id: str = "minioadmin"
+    s3_aws_secret_access_key: str = "minioadmin"
+    s3_region: str = "us-east-1"
+    s3_presign_upload_expires: int = 900    # 15 min — client must upload within this window
+    s3_presign_download_expires: int = 3600  # 1 h — download link TTL
+
+    @property
+    def max_cv_size_bytes(self) -> int:
+        return self.max_cv_size_mb * 1024 * 1024
 
 
 @lru_cache()
