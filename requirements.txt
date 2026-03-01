@@ -32,6 +32,15 @@ lxml==5.1.0
 # PDF Processing (for CV parsing)
 pdfplumber==0.10.4
 
+# AI / LLM (ATS analysis + CV tailoring)
+openai>=1.0.0
+
+# Rate Limiting
+slowapi>=0.1.9
+
+# Structured Logging
+structlog>=24.1.0
+
 # Object Storage (S3 / MinIO)
 aioboto3==13.3.0
 

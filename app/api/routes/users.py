@@ -6,13 +6,14 @@ Thin controllers - all business logic lives in UserService / CVService.
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select, delete as sa_delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.rate_limit import limiter, RATE_CV_UPLOAD, RATE_AI, RATE_TASK_POLL
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.user_skill import UserSkill
@@ -32,11 +33,13 @@ from app.schemas.cv import (
     CVConfirmRequest,
     CVResponse,
     CVDownloadUrlResponse,
+    CVAnalyzeRequest,
+    CVTaskStatusResponse,
 )
 
 
 class AddSkillRequest(BaseModel):
-    skill: str
+    skill: str = Field(..., min_length=1, max_length=100)
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -171,7 +174,9 @@ async def remove_user_skill(
 # ── CV Management ────────────────────────────────────────────────────────────
 
 @router.post("/me/cv/presign", response_model=CVPresignResponse, status_code=201)
+@limiter.limit(RATE_CV_UPLOAD)
 async def presign_cv_upload(
+    request: Request,
     req: CVPresignRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -179,10 +184,7 @@ async def presign_cv_upload(
     """
     Step 1 — Request a presigned S3 POST URL for direct CV upload.
 
-    The client validates file size / type locally, then calls this endpoint.
-    Response contains a short-lived upload_url + fields the client must POST
-    directly to S3 (never through this server).
-    After S3 returns 204, call POST /me/cv/{cv_id}/confirm.
+    Rate limited to 3/hour to prevent S3 quota abuse.
     """
     return await cv_service.presign_upload(db, current_user.id, req)
 
@@ -198,9 +200,7 @@ async def confirm_cv_upload(
     Step 3 — Confirm the S3 upload completed and trigger background processing.
 
     Verifies S3 object existence and hash integrity, then enqueues the Celery
-    process_cv task (text extraction + skill matching).
-    The returned CV record will have upload_status="uploaded" briefly, then
-    "processing", then "ready" once Celery finishes.
+    process_cv task (text extraction + chunking + embedding + skill matching).
     """
     return await cv_service.confirm_upload(db, current_user.id, cv_id, req)
 
@@ -222,8 +222,6 @@ async def get_cv_download_url(
 ):
     """
     Get a time-limited presigned S3 URL for downloading a CV.
-
-    The file is served directly from S3/CDN — no bytes pass through this server.
     The URL expires after ~1 hour.
     """
     return await cv_service.get_download_url(db, current_user.id, cv_id)
@@ -237,8 +235,63 @@ async def delete_cv(
 ):
     """
     Soft-delete a CV record and remove its file from S3.
-
-    All skills extracted from this CV are also deleted (cascade).
+    All skills, chunks, and analyses for this CV are cascade-deleted.
     """
     await cv_service.delete_cv(db, current_user.id, cv_id)
     return MessageResponse(message="CV deleted successfully")
+
+
+# ── CV AI/ATS Analysis ───────────────────────────────────────────────────────
+
+@router.post("/me/cv/{cv_id}/analyze", response_model=CVTaskStatusResponse)
+@limiter.limit(RATE_AI)
+async def analyze_cv(
+    request: Request,
+    cv_id: uuid.UUID,
+    req: CVAnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Analyze a CV against a job description.
+
+    Returns cached results immediately if available (within 24h),
+    otherwise enqueues a Celery task and returns a task_id for polling.
+    Rate limited to 10/hour per user (OpenAI cost control).
+    """
+    return await cv_service.start_analysis(db, current_user.id, cv_id, req.job_id)
+
+
+@router.post("/me/cv/{cv_id}/tailor", response_model=CVTaskStatusResponse)
+@limiter.limit(RATE_AI)
+async def tailor_cv_endpoint(
+    request: Request,
+    cv_id: uuid.UUID,
+    req: CVAnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Tailor CV summary + skills for a specific job.
+
+    Always runs asynchronously via Celery. Returns a task_id for polling.
+    Never fabricates work history or experience.
+    Rate limited to 10/hour per user.
+    """
+    return await cv_service.start_tailor(db, current_user.id, cv_id, req.job_id)
+
+
+@router.get("/me/cv/tasks/{task_id}", response_model=CVTaskStatusResponse)
+@limiter.limit(RATE_TASK_POLL)
+async def get_task_status(
+    request: Request,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Poll the status of a long-running CV task (analysis or tailoring).
+
+    States: pending → started → success | failure
+    When status=success, the result field contains the full response.
+    """
+    return cv_service.get_task_status(task_id)

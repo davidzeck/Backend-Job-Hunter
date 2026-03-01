@@ -4,32 +4,34 @@ Job Scout API - FastAPI Application Entry Point.
 Enterprise job alert platform for software engineers in Kenya/East Africa.
 """
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.exceptions import APIException
+from app.core.logging import RequestIDMiddleware, get_logger, setup_logging
+from app.core.rate_limit import limiter
 from app.api.routes import api_router
+
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan handler.
-
-    Handles startup and shutdown events.
-    """
-    # Startup
-    print(f"Starting {settings.app_name}...")
+    """Application lifespan handler — startup and shutdown."""
+    setup_logging()
+    logger.info("starting_app", app_name=settings.app_name, env=settings.environment)
     await init_db()
-    print("Database initialized")
+    logger.info("database_initialized")
 
     yield
 
-    # Shutdown
-    print("Shutting down...")
+    logger.info("shutting_down")
 
 
 # Create FastAPI application
@@ -42,13 +44,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Request ID correlation
+app.add_middleware(RequestIDMiddleware)
+
+# CORS middleware — explicit methods and headers, not wildcards
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 
@@ -68,9 +77,14 @@ async def api_exception_handler(request: Request, exc: APIException):
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    """Handle unexpected exceptions."""
-    # Log the error
-    print(f"Unexpected error: {exc}")
+    """Handle unexpected exceptions — log full detail, return sanitized message."""
+    logger.error(
+        "unhandled_exception",
+        exc_type=type(exc).__name__,
+        exc_message=str(exc),
+        path=request.url.path,
+        exc_info=True,
+    )
 
     if settings.debug:
         return JSONResponse(

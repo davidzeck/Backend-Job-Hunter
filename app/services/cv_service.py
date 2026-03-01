@@ -11,17 +11,17 @@ Business rules
 • SHA-256 deduplication — same hash as an existing active CV returns 409
 • One upload in flight at a time — blocks if a pending_upload record < 20 min old
 """
-import hashlib
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, delete as sa_delete
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core import storage
+from app.core.logging import get_logger
 from app.models.user_cv import (
     UserCV,
     UPLOAD_STATUS_PENDING,
@@ -30,13 +30,19 @@ from app.models.user_cv import (
     UPLOAD_STATUS_FAILED,
 )
 from app.models.user_skill import UserSkill
+from app.models.job import Job
+from app.models.cv_analysis import CVAnalysis
 from app.schemas.cv import (
     CVPresignRequest,
     CVPresignResponse,
     CVConfirmRequest,
     CVResponse,
     CVDownloadUrlResponse,
+    CVAnalysisResponse,
+    CVTaskStatusResponse,
 )
+
+logger = get_logger(__name__)
 
 # Maximum active CVs allowed per user
 MAX_CVS_PER_USER = 10
@@ -91,14 +97,28 @@ class CVService:
                 detail="This file has already been uploaded. Duplicate CV rejected.",
             )
 
-        # Guard: no two concurrent uploads — clean stale ones first
-        await self._cleanup_stale_pending(db, user_id)
+        # Guard: no two concurrent uploads — atomic cleanup + check
+        # Fix: single UPDATE instead of select-loop (TOCTOU safe)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=PENDING_UPLOAD_TTL_MINUTES)
+        await db.execute(
+            update(UserCV)
+            .where(
+                UserCV.user_id == user_id,
+                UserCV.upload_status == UPLOAD_STATUS_PENDING,
+                UserCV.created_at < cutoff,
+            )
+            .values(is_active=False)
+        )
+
+        # FOR UPDATE serializes concurrent presign requests for same user
         in_flight = await db.execute(
-            select(UserCV).where(
+            select(UserCV)
+            .where(
                 UserCV.user_id == user_id,
                 UserCV.upload_status == UPLOAD_STATUS_PENDING,
                 UserCV.is_active == True,
             )
+            .with_for_update(skip_locked=True)
         )
         if in_flight.scalar_one_or_none():
             raise HTTPException(
@@ -197,18 +217,21 @@ class CVService:
 
     async def list_cvs(self, db: AsyncSession, user_id: uuid.UUID) -> List[CVResponse]:
         """Return all active CVs for the user, most recently created first."""
+        # Single query with aggregated skills count (fixes N+1)
         result = await db.execute(
-            select(UserCV)
+            select(
+                UserCV,
+                func.count(UserSkill.id).label("skills_count"),
+            )
+            .outerjoin(UserSkill, UserSkill.cv_id == UserCV.id)
             .where(UserCV.user_id == user_id, UserCV.is_active == True)
+            .group_by(UserCV.id)
             .order_by(UserCV.created_at.desc())
         )
-        cvs = result.scalars().all()
-
-        responses = []
-        for cv in cvs:
-            skills_count = await self._count_cv_skills(db, cv.id)
-            responses.append(self._to_response(cv, skills_count))
-        return responses
+        return [
+            self._to_response(cv, skills_count)
+            for cv, skills_count in result.all()
+        ]
 
     # ── Download URL ──────────────────────────────────────────────────────────
 
@@ -246,7 +269,7 @@ class CVService:
         """
         Soft-delete the CV record (is_active=False) and delete the S3 object.
 
-        Skills associated with this CV are cascade-deleted by the ORM relationship.
+        Skills, chunks, and analyses associated with this CV are cascade-deleted.
         """
         cv = await self._get_cv(db, user_id, cv_id)
 
@@ -254,11 +277,159 @@ class CVService:
         try:
             await storage.delete_object(cv.s3_key)
         except Exception:
-            pass
+            logger.warning("s3_delete_failed", cv_id=str(cv_id), s3_key=cv.s3_key)
 
-        # Soft-delete record (cascade kills UserSkill rows)
+        # Soft-delete record (cascade kills UserSkill, CVChunk, CVAnalysis rows)
         cv.is_active = False
         await db.commit()
+
+    # ── AI/ATS: Analysis ─────────────────────────────────────────────────────
+
+    async def start_analysis(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        cv_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> CVTaskStatusResponse:
+        """
+        Start CV analysis against a job. Returns cached result immediately
+        if available (within 24h), otherwise enqueues Celery task.
+        """
+        cv = await self._get_cv(db, user_id, cv_id)
+        if cv.upload_status != UPLOAD_STATUS_READY:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"CV is not ready for analysis (status: {cv.upload_status}). "
+                       "Wait for processing to complete.",
+            )
+
+        # Validate job exists and has a description
+        job = (await db.execute(
+            select(Job).where(Job.id == job_id, Job.is_active == True)
+        )).scalar_one_or_none()
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Job not found."
+            )
+        if not job.description:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Job has no description to analyze against.",
+            )
+
+        # Check cache (24h TTL)
+        now = datetime.now(timezone.utc)
+        cached = (await db.execute(
+            select(CVAnalysis).where(
+                CVAnalysis.cv_id == cv_id,
+                CVAnalysis.job_id == job_id,
+                CVAnalysis.expires_at > now,
+            )
+        )).scalar_one_or_none()
+
+        if cached:
+            logger.info("cv_analysis_cache_hit", cv_id=str(cv_id), job_id=str(job_id))
+            return CVTaskStatusResponse(
+                task_id="cached",
+                status="success",
+                result=CVAnalysisResponse(
+                    cv_id=cv_id,
+                    job_id=job_id,
+                    match_score=cached.match_score,
+                    present_keywords=cached.present_keywords,
+                    missing_keywords=cached.missing_keywords,
+                    suggested_additions=cached.suggested_additions,
+                    cached=True,
+                    analyzed_at=cached.analyzed_at,
+                ).model_dump(mode="json"),
+            )
+
+        # Enqueue Celery task
+        from app.workers.tasks import analyze_cv_for_job
+        task = analyze_cv_for_job.apply_async(
+            args=[str(user_id), str(cv_id), str(job_id)],
+            queue="cv_processing",
+        )
+        logger.info("cv_analysis_enqueued", cv_id=str(cv_id), job_id=str(job_id), task_id=task.id)
+        return CVTaskStatusResponse(task_id=task.id, status="pending")
+
+    # ── AI/ATS: Tailoring ────────────────────────────────────────────────────
+
+    async def start_tailor(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        cv_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> CVTaskStatusResponse:
+        """
+        Start CV tailoring for a specific job. Always async via Celery.
+        """
+        cv = await self._get_cv(db, user_id, cv_id)
+        if cv.upload_status != UPLOAD_STATUS_READY:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"CV is not ready for tailoring (status: {cv.upload_status}).",
+            )
+
+        job = (await db.execute(
+            select(Job).where(Job.id == job_id, Job.is_active == True)
+        )).scalar_one_or_none()
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Job not found."
+            )
+        if not job.description:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Job has no description to tailor against.",
+            )
+
+        from app.workers.tasks import tailor_cv
+        task = tailor_cv.apply_async(
+            args=[str(user_id), str(cv_id), str(job_id)],
+            queue="cv_processing",
+        )
+        logger.info("cv_tailor_enqueued", cv_id=str(cv_id), job_id=str(job_id), task_id=task.id)
+        return CVTaskStatusResponse(task_id=task.id, status="pending")
+
+    # ── AI/ATS: Task Status ──────────────────────────────────────────────────
+
+    @staticmethod
+    def get_task_status(task_id: str) -> CVTaskStatusResponse:
+        """
+        Check status of a Celery task by ID.
+        Maps Celery states to our API states.
+        """
+        from app.workers.celery_app import celery_app
+
+        result = celery_app.AsyncResult(task_id)
+
+        status_map = {
+            "PENDING": "pending",
+            "STARTED": "started",
+            "SUCCESS": "success",
+            "FAILURE": "failure",
+            "RETRY": "pending",
+        }
+        mapped_status = status_map.get(result.status, "pending")
+
+        response = CVTaskStatusResponse(task_id=task_id, status=mapped_status)
+
+        if result.status == "SUCCESS":
+            task_result = result.result
+            if isinstance(task_result, dict) and "error" in task_result:
+                response.status = "failure"
+                response.error = task_result["error"]
+            else:
+                response.result = task_result
+        elif result.status == "FAILURE":
+            # Never expose raw traceback — return sanitized message
+            response.error = "Task failed. Please try again."
+            logger.error("celery_task_failed", task_id=task_id, error=str(result.result))
+
+        return response
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -285,33 +456,6 @@ class CVService:
             )
         )
         return result.scalar_one()
-
-    async def _count_cv_skills(self, db: AsyncSession, cv_id: uuid.UUID) -> int:
-        result = await db.execute(
-            select(func.count()).where(UserSkill.cv_id == cv_id)
-        )
-        return result.scalar_one()
-
-    async def _cleanup_stale_pending(self, db: AsyncSession, user_id: uuid.UUID) -> None:
-        """
-        Remove pending_upload records older than PENDING_UPLOAD_TTL_MINUTES.
-
-        This lets users retry after an S3 upload timeout without hitting the
-        "another upload in progress" guard.
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=PENDING_UPLOAD_TTL_MINUTES)
-        result = await db.execute(
-            select(UserCV).where(
-                UserCV.user_id == user_id,
-                UserCV.upload_status == UPLOAD_STATUS_PENDING,
-                UserCV.created_at < cutoff,
-            )
-        )
-        stale = result.scalars().all()
-        for cv in stale:
-            cv.is_active = False
-        if stale:
-            await db.commit()
 
     @staticmethod
     def _to_response(cv: UserCV, skills_count: int) -> CVResponse:

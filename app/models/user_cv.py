@@ -18,6 +18,8 @@ from app.models.base import BaseModel
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.user_skill import UserSkill
+    from app.models.cv_chunk import CVChunk
+    from app.models.cv_analysis import CVAnalysis
 
 # Valid upload_status values (referenced in service + tasks)
 UPLOAD_STATUS_PENDING = "pending_upload"
@@ -76,11 +78,23 @@ class UserCV(BaseModel):
         nullable=True,
     )
 
+    # Full extracted text cached here so analysis/tailoring doesn't re-download from S3
+    full_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="cvs")
     skills: Mapped[List["UserSkill"]] = relationship(
         "UserSkill",
         back_populates="cv",
+        cascade="all, delete-orphan",
+    )
+    chunks: Mapped[List["CVChunk"]] = relationship(
+        "CVChunk",
+        back_populates="cv",
+        cascade="all, delete-orphan",
+    )
+    analyses: Mapped[List["CVAnalysis"]] = relationship(
+        "CVAnalysis",
         cascade="all, delete-orphan",
     )
 

@@ -4,7 +4,16 @@ All configuration is loaded from environment variables.
 """
 from functools import lru_cache
 from typing import List, Optional
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Secrets that must never be used outside development
+_DEV_ONLY_DEFAULTS = {
+    "secret_key": "your-super-secret-key-change-in-production",
+    "s3_aws_access_key_id": "minioadmin",
+    "s3_aws_secret_access_key": "minioadmin",
+}
 
 
 class Settings(BaseSettings):
@@ -69,9 +78,29 @@ class Settings(BaseSettings):
     s3_presign_upload_expires: int = 900    # 15 min — client must upload within this window
     s3_presign_download_expires: int = 3600  # 1 h — download link TTL
 
+    # OpenAI (AI/ATS layer)
+    openai_api_key: Optional[str] = None
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_chat_model: str = "gpt-4o-mini"
+    openai_max_tokens_analysis: int = 1500
+    openai_max_tokens_tailor: int = 2000
+
     @property
     def max_cv_size_bytes(self) -> int:
         return self.max_cv_size_mb * 1024 * 1024
+
+    @model_validator(mode="after")
+    def _reject_dev_secrets_in_production(self) -> "Settings":
+        """Fail loud if production/staging still uses dev-only default secrets."""
+        if self.environment in ("production", "staging"):
+            for field_name, dev_default in _DEV_ONLY_DEFAULTS.items():
+                actual = getattr(self, field_name)
+                if actual == dev_default:
+                    raise ValueError(
+                        f"SECURITY: '{field_name}' is still set to its development default. "
+                        f"Set a real value via environment variable in {self.environment}."
+                    )
+        return self
 
 
 @lru_cache()

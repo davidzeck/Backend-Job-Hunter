@@ -13,6 +13,8 @@ from app.models.user_skill import UserSkill
 from app.models.job_skill import JobSkill
 from app.models.user_job_alert import UserJobAlert
 from app.models.scrape_log import ScrapeLog
+from app.models.cv_chunk import CVChunk
+from app.models.cv_analysis import CVAnalysis
 
 __all__ = [
     "BaseModel",
@@ -27,4 +29,6 @@ __all__ = [
     "JobSkill",
     "UserJobAlert",
     "ScrapeLog",
+    "CVChunk",
+    "CVAnalysis",
 ]

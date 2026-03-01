@@ -83,7 +83,13 @@ class CVDownloadUrlResponse(BaseSchema):
     expires_in_seconds: int
 
 
-# ── Tier 2 — AI/ATS (schemas; endpoints added in Phase 2) ───────────────────
+# ── Tier 2 — AI/ATS ──────────────────────────────────────────────────────────
+
+class CVAnalyzeRequest(BaseSchema):
+    """Request body for analyze and tailor endpoints."""
+
+    job_id: UUID
+
 
 class SkillKeyword(BaseSchema):
     """A single skill/keyword from ATS analysis."""
