@@ -122,6 +122,7 @@ async def _process_cv(user_id: str, cv_id: str):
 
     import pdfplumber
     from sqlalchemy import select, delete
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.core import storage
     from app.models.user_cv import (
@@ -163,20 +164,36 @@ async def _process_cv(user_id: str, cv_id: str):
             # ── 4. Keyword skill matching ─────────────────────────────────────
             extracted = _extract_skills_from_text(text_lower)
 
-            # ── 5. Replace skills for this CV ─────────────────────────────────
+            # ── 5. Upsert skills for this CV ──────────────────────────────────
+            # Delete only the skills sourced from THIS cv (by cv_id).
+            # Skills from other sources (manual, other CVs) are left untouched.
             await db.execute(
                 delete(UserSkill).where(UserSkill.cv_id == cv.id)
             )
+            # Use INSERT ... ON CONFLICT DO UPDATE (upsert) to handle the case
+            # where the same skill already exists for this user from another
+            # source — we update it to point at the current CV instead of
+            # raising a unique-constraint violation.
             for skill_name, skill_category in extracted:
-                db.add(
-                    UserSkill(
+                stmt = (
+                    pg_insert(UserSkill)
+                    .values(
                         user_id=cv.user_id,
                         cv_id=cv.id,
                         skill_name=skill_name,
                         skill_category=skill_category,
                         source="cv",
                     )
+                    .on_conflict_do_update(
+                        constraint="uq_user_skill",
+                        set_={
+                            "cv_id": cv.id,
+                            "skill_category": skill_category,
+                            "source": "cv",
+                        },
+                    )
                 )
+                await db.execute(stmt)
 
             # ── 6. Mark ready ─────────────────────────────────────────────────
             cv.upload_status = UPLOAD_STATUS_READY

@@ -4,13 +4,18 @@ User routes.
 Thin controllers - all business logic lives in UserService / CVService.
 """
 import uuid
+from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+from sqlalchemy import select, delete as sa_delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.models.user_skill import UserSkill
 from app.services.user_service import UserService
 from app.services.cv_service import CVService
 from app.schemas.user import (
@@ -28,6 +33,10 @@ from app.schemas.cv import (
     CVResponse,
     CVDownloadUrlResponse,
 )
+
+
+class AddSkillRequest(BaseModel):
+    skill: str
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -104,6 +113,59 @@ async def delete_current_user(
     """Soft-delete current user's account."""
     await user_service.deactivate_account(db, current_user)
     return MessageResponse(message="Account deleted successfully")
+
+
+# ── Skills ────────────────────────────────────────────────────────────────────
+
+@router.get("/me/skills", response_model=List[str])
+async def get_user_skills(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return all skill names for the current user."""
+    result = await db.execute(
+        select(UserSkill.skill_name).where(UserSkill.user_id == current_user.id)
+    )
+    return result.scalars().all()
+
+
+@router.post("/me/skills", response_model=MessageResponse, status_code=201)
+async def add_user_skill(
+    req: AddSkillRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually add a skill (source='manual'). Upserts on conflict."""
+    skill = req.skill.strip()
+    if not skill:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Skill name is required.")
+    stmt = (
+        pg_insert(UserSkill)
+        .values(user_id=current_user.id, skill_name=skill, source="manual")
+        .on_conflict_do_nothing(constraint="uq_user_skill")
+    )
+    await db.execute(stmt)
+    await db.commit()
+    return MessageResponse(message=f"Skill '{skill}' added.")
+
+
+@router.delete("/me/skills/{skill_name}", response_model=MessageResponse)
+async def remove_user_skill(
+    skill_name: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a skill by name."""
+    result = await db.execute(
+        sa_delete(UserSkill).where(
+            UserSkill.user_id == current_user.id,
+            UserSkill.skill_name == skill_name,
+        )
+    )
+    await db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found.")
+    return MessageResponse(message=f"Skill '{skill_name}' removed.")
 
 
 # ── CV Management ────────────────────────────────────────────────────────────
