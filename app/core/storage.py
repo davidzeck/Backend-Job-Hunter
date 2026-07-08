@@ -80,6 +80,10 @@ async def generate_presign_upload(s3_key: str, max_size_bytes: int) -> dict:
         response = await s3.generate_presigned_post(
             Bucket=settings.s3_bucket_name,
             Key=s3_key,
+            # Prefill Content-Type so it's returned in `fields` and clients POST
+            # it back. The matching Condition must also be listed (boto only
+            # prefills a Field that has its own explicit condition).
+            Fields={"Content-Type": "application/pdf"},
             Conditions=[
                 {"Content-Type": "application/pdf"},
                 ["content-length-range", 1, max_size_bytes],

@@ -42,6 +42,29 @@ class JobListItem(JobBase, IDSchema):
     posted_at: Optional[datetime] = None
     discovered_at: datetime
     is_active: bool
+    # Current user's actions on this job (annotated per-request)
+    saved: bool = False
+    applied: bool = False
+
+
+class SaveJobRequest(BaseSchema):
+    """Toggle whether the current user has saved a job."""
+
+    saved: bool
+
+
+class AppliedJobRequest(BaseSchema):
+    """Toggle whether the current user has marked a job applied."""
+
+    applied: bool
+
+
+class JobInteractionResponse(BaseSchema):
+    """The current user's saved/applied state for a job."""
+
+    job_id: UUID
+    saved: bool
+    applied: bool
 
 
 class JobDetail(JobListItem, TimestampSchema):

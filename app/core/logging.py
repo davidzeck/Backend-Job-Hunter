@@ -77,7 +77,8 @@ def setup_logging() -> None:
     root.setLevel(logging.DEBUG if settings.debug else logging.INFO)
 
     # Silence noisy third-party loggers
-    for noisy in ("uvicorn.access", "httpx", "aiobotocore"):
+    for noisy in ("uvicorn.access", "httpx", "aiobotocore",
+                  "botocore", "boto3", "s3transfer"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

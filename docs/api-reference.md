@@ -83,8 +83,11 @@ The daily cap returns 429 `"Daily AI usage limit reached. Try again tomorrow."` 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| `GET /jobs/` | 🔒 | Query: `role`, `location`, `location_type`, `company` (repeatable), `days_ago`, `page`, `limit` | `PaginatedResponse[JobListItem]` |
-| `GET /jobs/{job_id}` | 🔒 | — | `JobDetail` (adds description, seniority, salary, skills, timestamps) |
+| `GET /jobs/` | 🔒 | Query: `role`, `location`, `location_type`, `company` (repeatable), `days_ago`, `page`, `limit` | `PaginatedResponse[JobListItem]` — each item annotated with the caller's `saved`/`applied` |
+| `GET /jobs/saved` | 🔒 | Query: `page`, `limit` | `PaginatedResponse[JobListItem]` — jobs the caller has saved |
+| `GET /jobs/{job_id}` | 🔒 | — | `JobDetail` (adds description, seniority, salary, skills, timestamps, `saved`/`applied`) |
+| `PUT /jobs/{job_id}/saved` | 🔒 | `{saved: bool}` | `JobInteractionResponse {job_id, saved, applied}` — toggle saved |
+| `PUT /jobs/{job_id}/applied` | 🔒 | `{applied: bool}` | `JobInteractionResponse` — toggle applied (sets `applied_at`) |
 | `GET /jobs/{job_id}/skill-gap` | 🔒 | — | `SkillGapResponse {matched: SkillMatch[], missing: MissingSkill[], partial: PartialSkill[]}` — user skills vs job requirements |
 
 ## Companies — [`routes/companies.py`](../app/api/routes/companies.py) (prefix `/companies`)
@@ -138,4 +141,4 @@ Scraper-source administration (dashboard's Sources pages). 👑 **Admin-only at 
 
 ## Endpoints clients call that DON'T exist (yet)
 
-The dashboard UI still references these; they 404 against this backend — see [known issue #8](../../docs/known-issues.md): `/users/me/notifications*`, `/users/me/alert-preferences`, `/users/me/export`, `PATCH /jobs/{id}`, `GET /companies/{id}/jobs`, `GET /companies/{id}/sources`. (The auth/session/password-reset endpoints formerly on this list were implemented on 2026-07-08.)
+The dashboard UI still references these; they 404 against this backend — see [known issue #8](../../docs/known-issues.md): `/users/me/notifications*`, `/users/me/alert-preferences`, `/users/me/export`, `GET /companies/{id}/jobs`, `GET /companies/{id}/sources`. (The auth/session/password-reset endpoints formerly on this list were implemented on 2026-07-08; `PATCH /jobs/{id}` was dropped the same day in favour of the real `/jobs/{id}/saved|applied` endpoints above.)

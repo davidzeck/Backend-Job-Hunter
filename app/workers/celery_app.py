@@ -11,7 +11,7 @@ from app.core.config import settings
 celery_app = Celery(
     "job_scout",
     broker=settings.redis_url,
-    backend=f"{settings.redis_url}/1",  # Use different DB for results
+    backend=f"{settings.redis_url.rsplit('/', 1)[0]}/1",  # results in db 1 (broker is db 0)
 )
 
 # Configure Celery
@@ -29,6 +29,11 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=300,  # 5 minutes hard limit
     task_soft_time_limit=240,  # 4 minutes soft limit
+
+    # Route un-queued tasks (scrape_source, notify_matching_users, scheduler
+    # tasks) to "default" — the queue the worker actually consumes. Without
+    # this they'd go to Celery's built-in "celery" queue and never run.
+    task_default_queue="default",
 
     # Worker settings
     worker_prefetch_multiplier=1,  # Don't prefetch (scraping is slow)

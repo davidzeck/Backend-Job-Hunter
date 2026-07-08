@@ -145,10 +145,10 @@ class AuthService:
         device: Optional[str] = None,
         browser: Optional[str] = None,
         ip: Optional[str] = None,
-    ) -> TokenResponse:
+    ) -> tuple[TokenResponse, User]:
         """
         Rotate a refresh token: validate its session row, replace it with a
-        child row, and return a fresh pair.
+        child row, and return a fresh pair plus the authenticated user.
 
         Security behavior:
         - hash mismatch / revoked / expired → 401
@@ -223,7 +223,7 @@ class AuthService:
             rotated_from=row,
         )
         await db.commit()
-        return tokens
+        return tokens, user
 
     # ── Logout & revocation ──────────────────────────────────────────────
 

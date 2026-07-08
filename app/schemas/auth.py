@@ -11,6 +11,7 @@ from typing import Optional
 from pydantic import EmailStr, Field
 
 from app.schemas.base import BaseSchema
+from app.schemas.user import UserProfileResponse
 
 
 class RegisterRequest(BaseSchema):
@@ -33,6 +34,9 @@ class TokenResponse(BaseSchema):
     refresh_token: Optional[str] = None
     token_type: str = "bearer"
     expires_in: int  # seconds
+    # Populated on /refresh so web clients can bootstrap the session in one
+    # round-trip (no follow-up GET /users/me). Null on login/register.
+    user: Optional[UserProfileResponse] = None
 
 
 class RefreshTokenRequest(BaseSchema):

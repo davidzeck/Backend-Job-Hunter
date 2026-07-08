@@ -37,6 +37,16 @@ async def test_refresh_body_rotates_pair(client, registered_user):
     assert me.status_code == 200
 
 
+async def test_refresh_returns_profile(client, registered_user):
+    """Refresh includes the user profile so web clients bootstrap in one call."""
+    res = await _refresh(client, registered_user["tokens"]["refresh_token"])
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["user"] is not None
+    assert body["user"]["email"] == registered_user["email"]
+    assert body["user"]["is_admin"] is False  # the field the dashboard nav gates on
+
+
 async def test_refresh_cookie_mode_rotates_cookie(client, registered_user, login):
     res = await login(
         client, registered_user["email"], registered_user["password"], web=True, remember=True

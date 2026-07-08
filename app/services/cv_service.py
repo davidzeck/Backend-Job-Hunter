@@ -83,12 +83,15 @@ class CVService:
                        "Delete an existing one before uploading a new one.",
             )
 
-        # Guard: duplicate (same hash already uploaded by this user)
+        # Guard: duplicate (same hash already *successfully* uploaded by this user).
+        # Exclude pending_upload rows — a failed/abandoned attempt must not lock
+        # out re-uploading the same file (the pending-TTL sweep below reaps it).
         existing_hash = await db.execute(
             select(UserCV).where(
                 UserCV.user_id == user_id,
                 UserCV.file_hash == req.file_hash,
                 UserCV.is_active == True,
+                UserCV.upload_status != UPLOAD_STATUS_PENDING,
             )
         )
         if existing_hash.scalar_one_or_none():

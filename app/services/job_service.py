@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import JobNotFoundException
 from app.models.user import User
 from app.repositories.job_repository import JobRepository
+from app.repositories.job_interaction_repository import JobInteractionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.job import (
     JobListItem,
     JobDetail,
     CompanyBrief,
     JobSkillResponse,
+    JobInteractionResponse,
     SkillGapResponse,
     SkillMatch,
     MissingSkill,
@@ -29,11 +31,13 @@ class JobService:
     def __init__(self):
         self.job_repo = JobRepository()
         self.user_repo = UserRepository()
+        self.interaction_repo = JobInteractionRepository()
 
     async def list_jobs(
         self,
         db: AsyncSession,
         *,
+        current_user_id: Optional[UUID] = None,
         company_slugs: Optional[List[str]] = None,
         location: Optional[str] = None,
         role: Optional[str] = None,
@@ -42,7 +46,7 @@ class JobService:
         page: int = 1,
         limit: int = 20,
     ) -> PaginatedResponse[JobListItem]:
-        """Get paginated job listing with filters."""
+        """Get paginated job listing with filters, annotated with the user's actions."""
         jobs, total = await self.job_repo.find_with_filters(
             db,
             company_slugs=company_slugs,
@@ -54,7 +58,8 @@ class JobService:
             limit=limit,
         )
 
-        items = [self._to_list_item(job) for job in jobs]
+        interactions = await self._interaction_map(db, current_user_id, jobs)
+        items = [self._to_list_item(job, interactions) for job in jobs]
 
         return PaginatedResponse(
             items=items,
@@ -68,9 +73,10 @@ class JobService:
         self,
         db: AsyncSession,
         job_id: UUID,
+        current_user_id: Optional[UUID] = None,
     ) -> JobDetail:
         """
-        Get full job details including skills.
+        Get full job details including skills, annotated with the user's actions.
 
         Raises:
             JobNotFoundException: If job doesn't exist.
@@ -79,6 +85,12 @@ class JobService:
 
         if not job:
             raise JobNotFoundException()
+
+        saved = applied = False
+        if current_user_id is not None:
+            interaction = await self.interaction_repo.get(db, current_user_id, job.id)
+            if interaction:
+                saved, applied = interaction.saved, interaction.applied
 
         return JobDetail(
             id=job.id,
@@ -96,6 +108,8 @@ class JobService:
             posted_at=job.posted_at,
             discovered_at=job.discovered_at,
             is_active=job.is_active,
+            saved=saved,
+            applied=applied,
             description=job.description,
             seniority_level=job.seniority_level,
             salary_min=job.salary_min,
@@ -113,6 +127,67 @@ class JobService:
                 )
                 for skill in job.skills
             ],
+        )
+
+    async def list_saved_jobs(
+        self,
+        db: AsyncSession,
+        current_user_id: UUID,
+        *,
+        page: int = 1,
+        limit: int = 20,
+    ) -> PaginatedResponse[JobListItem]:
+        """Paginated list of jobs the user has saved (all annotated saved=True)."""
+        jobs, total = await self.interaction_repo.list_saved(
+            db, current_user_id, page=page, limit=limit
+        )
+        interactions = await self._interaction_map(db, current_user_id, jobs)
+        items = [self._to_list_item(job, interactions) for job in jobs]
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            page=page,
+            limit=limit,
+            pages=(total + limit - 1) // limit if total > 0 else 0,
+        )
+
+    async def set_saved(
+        self, db: AsyncSession, current_user_id: UUID, job_id: UUID, saved: bool
+    ) -> JobInteractionResponse:
+        """Toggle the current user's saved state for a job."""
+        await self._ensure_job_exists(db, job_id)
+        interaction = await self.interaction_repo.set_saved(
+            db, current_user_id, job_id, saved
+        )
+        await db.commit()
+        return JobInteractionResponse(
+            job_id=job_id, saved=interaction.saved, applied=interaction.applied
+        )
+
+    async def set_applied(
+        self, db: AsyncSession, current_user_id: UUID, job_id: UUID, applied: bool
+    ) -> JobInteractionResponse:
+        """Toggle the current user's applied state for a job."""
+        await self._ensure_job_exists(db, job_id)
+        interaction = await self.interaction_repo.set_applied(
+            db, current_user_id, job_id, applied
+        )
+        await db.commit()
+        return JobInteractionResponse(
+            job_id=job_id, saved=interaction.saved, applied=interaction.applied
+        )
+
+    async def _ensure_job_exists(self, db: AsyncSession, job_id: UUID) -> None:
+        job = await self.job_repo.get_by_id(db, job_id)
+        if not job:
+            raise JobNotFoundException()
+
+    async def _interaction_map(self, db: AsyncSession, current_user_id, jobs) -> dict:
+        """Build {job_id: (saved, applied)} for the current user, or empty if anonymous."""
+        if current_user_id is None or not jobs:
+            return {}
+        return await self.interaction_repo.map_for_jobs(
+            db, current_user_id, [job.id for job in jobs]
         )
 
     async def analyze_skill_gap(
@@ -203,8 +278,9 @@ class JobService:
             recommendation=recommendation,
         )
 
-    def _to_list_item(self, job) -> JobListItem:
-        """Convert a Job model to a JobListItem response."""
+    def _to_list_item(self, job, interactions: Optional[dict] = None) -> JobListItem:
+        """Convert a Job model to a JobListItem, annotated with the user's actions."""
+        saved, applied = (interactions or {}).get(job.id, (False, False))
         return JobListItem(
             id=job.id,
             title=job.title,
@@ -221,4 +297,6 @@ class JobService:
             posted_at=job.posted_at,
             discovered_at=job.discovered_at,
             is_active=job.is_active,
+            saved=saved,
+            applied=applied,
         )

@@ -41,11 +41,13 @@ from app.schemas.auth import (
 )
 from app.schemas.base import MessageResponse
 from app.services.auth_service import AuthService
+from app.services.user_service import UserService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # Service instance - stateless, safe to reuse across requests.
 auth_service = AuthService()
+user_service = UserService()
 
 
 # ── HTTP helpers (controller-level concerns only) ───────────────────────
@@ -183,9 +185,11 @@ async def refresh_token(
         raise InvalidTokenException()
 
     device, browser = _device_info(request)
-    tokens = await auth_service.refresh(
+    tokens, user = await auth_service.refresh(
         db, raw_token=raw, device=device, browser=browser, ip=_client_ip(request)
     )
+    # Include the profile so web clients bootstrap in one round-trip (no /users/me).
+    tokens.user = await user_service.get_profile(db, user)
     # Rotated web cookie stays persistent — remember-me choice is sticky via
     # the original Max-Age; session-cookie users get a session cookie again.
     persistent = bool(request.cookies.get(settings.refresh_cookie_name)) and _is_web(request)

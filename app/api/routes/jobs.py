@@ -13,7 +13,14 @@ from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.services.job_service import JobService
-from app.schemas.job import JobListItem, JobDetail, SkillGapResponse
+from app.schemas.job import (
+    JobListItem,
+    JobDetail,
+    SkillGapResponse,
+    SaveJobRequest,
+    AppliedJobRequest,
+    JobInteractionResponse,
+)
 from app.schemas.base import PaginatedResponse
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -36,6 +43,7 @@ async def list_jobs(
     """List jobs with optional filters and pagination."""
     return await job_service.list_jobs(
         db,
+        current_user_id=current_user.id,
         company_slugs=company,
         location=location,
         role=role,
@@ -46,6 +54,21 @@ async def list_jobs(
     )
 
 
+# NOTE: /saved must be declared before /{job_id} — otherwise "saved" is parsed
+# as a UUID path param and 422s.
+@router.get("/saved", response_model=PaginatedResponse[JobListItem])
+async def list_saved_jobs(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the jobs the current user has saved."""
+    return await job_service.list_saved_jobs(
+        db, current_user.id, page=page, limit=limit
+    )
+
+
 @router.get("/{job_id}", response_model=JobDetail)
 async def get_job(
     job_id: UUID,
@@ -53,7 +76,29 @@ async def get_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Get full job details by ID."""
-    return await job_service.get_job_detail(db, job_id)
+    return await job_service.get_job_detail(db, job_id, current_user.id)
+
+
+@router.put("/{job_id}/saved", response_model=JobInteractionResponse)
+async def set_job_saved(
+    job_id: UUID,
+    body: SaveJobRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save or unsave a job for the current user."""
+    return await job_service.set_saved(db, current_user.id, job_id, body.saved)
+
+
+@router.put("/{job_id}/applied", response_model=JobInteractionResponse)
+async def set_job_applied(
+    job_id: UUID,
+    body: AppliedJobRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark a job applied/not-applied for the current user."""
+    return await job_service.set_applied(db, current_user.id, job_id, body.applied)
 
 
 @router.get("/{job_id}/skill-gap", response_model=SkillGapResponse)
