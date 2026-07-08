@@ -169,7 +169,7 @@ async def _process_cv(user_id: str, cv_id: str):
 
             # ── 6. Generate embeddings (skip if no API key) ─────────────────
             embeddings = None
-            if settings.openai_api_key:
+            if settings.gemini_api_key:
                 try:
                     from app.core.ai import generate_embeddings_batch
                     embeddings = await generate_embeddings_batch(

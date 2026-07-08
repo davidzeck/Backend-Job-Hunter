@@ -5,12 +5,15 @@ This service owns ALL user profile operations. Routes never touch
 the database directly - they call methods here.
 """
 from typing import Optional
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.denylist import revoke_session_marker
 from app.core.security import hash_password, verify_password
 from app.core.exceptions import BadRequestException
 from app.models.user import User
+from app.repositories.auth_session_repository import AuthSessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import UserResponse, UserProfileResponse
 
@@ -20,6 +23,7 @@ class UserService:
 
     def __init__(self):
         self.user_repo = UserRepository()
+        self.session_repo = AuthSessionRepository()
 
     async def get_profile(
         self,
@@ -43,6 +47,7 @@ class UserService:
             phone=user.phone,
             email_verified=user.email_verified,
             is_active=user.is_active,
+            is_admin=user.is_admin,
             preferences=user.preferences,
             last_seen_at=user.last_seen_at,
             created_at=user.created_at,
@@ -110,9 +115,12 @@ class UserService:
         *,
         current_password: str,
         new_password: str,
+        current_sid: Optional[str] = None,
     ) -> None:
         """
-        Change user's password.
+        Change user's password and revoke every OTHER login session —
+        stolen-credential sessions die; the session changing the password
+        survives.
 
         Raises:
             BadRequestException: If current password is wrong.
@@ -122,7 +130,15 @@ class UserService:
 
         new_hash = hash_password(new_password)
         await self.user_repo.update(db, user, password_hash=new_hash)
+
+        families = await self.session_repo.revoke_all_for_user(
+            db,
+            user.id,
+            except_family=UUID(current_sid) if current_sid else None,
+        )
         await db.commit()
+        for fam in families:
+            await revoke_session_marker(str(fam))
 
     async def deactivate_account(
         self,
@@ -152,6 +168,7 @@ class UserService:
             phone=user.phone,
             email_verified=user.email_verified,
             is_active=user.is_active,
+            is_admin=user.is_admin,
             preferences=user.preferences,
             last_seen_at=user.last_seen_at,
             created_at=user.created_at,

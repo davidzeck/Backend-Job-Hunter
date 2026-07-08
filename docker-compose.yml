@@ -5,7 +5,8 @@ services:
   # ─── FastAPI Application ───────────────────────────
   api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # --proxy-headers: real client IPs behind the Next.js dev proxy (rate limits, session IPs)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --proxy-headers --forwarded-allow-ips="*"
     volumes:
       - .:/app
     ports:

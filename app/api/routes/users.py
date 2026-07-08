@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.rate_limit import limiter, RATE_CV_UPLOAD, RATE_AI, RATE_TASK_POLL
+from app.core.rate_limit import limiter, RATE_CV_UPLOAD, RATE_AI, RATE_TASK_POLL, check_ai_daily_cap
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.user_skill import UserSkill
@@ -94,16 +94,19 @@ async def update_fcm_token(
 
 @router.post("/me/change-password", response_model=MessageResponse)
 async def change_password(
-    request: ChangePasswordRequest,
+    request: Request,
+    body: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Change current user's password."""
+    """Change current user's password. Revokes all other login sessions."""
+    payload = getattr(request.state, "token_payload", None) or {}
     await user_service.change_password(
         db,
         current_user,
-        current_password=request.current_password,
-        new_password=request.new_password,
+        current_password=body.current_password,
+        new_password=body.new_password,
+        current_sid=payload.get("sid"),
     )
     return MessageResponse(message="Password changed successfully")
 
@@ -257,8 +260,10 @@ async def analyze_cv(
 
     Returns cached results immediately if available (within 24h),
     otherwise enqueues a Celery task and returns a task_id for polling.
-    Rate limited to 10/hour per user (OpenAI cost control).
+    Rate limited to 10/hour + 50/day per user (Gemini cost control).
     """
+    if not await check_ai_daily_cap(str(current_user.id)):
+        raise HTTPException(status_code=429, detail="Daily AI usage limit reached. Try again tomorrow.")
     return await cv_service.start_analysis(db, current_user.id, cv_id, req.job_id)
 
 
@@ -276,8 +281,10 @@ async def tailor_cv_endpoint(
 
     Always runs asynchronously via Celery. Returns a task_id for polling.
     Never fabricates work history or experience.
-    Rate limited to 10/hour per user.
+    Rate limited to 10/hour + 50/day per user (Gemini cost control).
     """
+    if not await check_ai_daily_cap(str(current_user.id)):
+        raise HTTPException(status_code=429, detail="Daily AI usage limit reached. Try again tomorrow.")
     return await cv_service.start_tailor(db, current_user.id, cv_id, req.job_id)
 
 

@@ -33,7 +33,7 @@ lxml==5.1.0
 pdfplumber==0.10.4
 
 # AI / LLM (ATS analysis + CV tailoring)
-openai>=1.0.0
+google-genai>=1.0.0
 
 # Rate Limiting
 slowapi>=0.1.9

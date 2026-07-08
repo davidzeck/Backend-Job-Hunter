@@ -92,6 +92,11 @@ class User(BaseModel):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    auth_sessions: Mapped[List["AuthSession"]] = relationship(
+        "AuthSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<User {self.email}>"

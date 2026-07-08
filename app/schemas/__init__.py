@@ -8,13 +8,14 @@ from app.schemas.base import (
     ErrorResponse,
 )
 from app.schemas.auth import (
-    LoginRequest,
     RegisterRequest,
     TokenResponse,
     RefreshTokenRequest,
     ChangePasswordRequest,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    VerifyEmailRequest,
+    SessionResponse,
 )
 from app.schemas.user import (
     UserCreate,
@@ -57,13 +58,14 @@ __all__ = [
     "MessageResponse",
     "ErrorResponse",
     # Auth
-    "LoginRequest",
     "RegisterRequest",
     "TokenResponse",
     "RefreshTokenRequest",
     "ChangePasswordRequest",
     "ForgotPasswordRequest",
     "ResetPasswordRequest",
+    "VerifyEmailRequest",
+    "SessionResponse",
     # User
     "UserCreate",
     "UserUpdate",

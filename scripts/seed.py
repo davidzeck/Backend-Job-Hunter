@@ -108,6 +108,20 @@ COMPANIES = [
         "description": "Fintech infrastructure for financial services",
         "logo_url": "https://logo.clearbit.com/plaid.com",
     },
+    {
+        "name": "Figma",
+        "slug": "figma",
+        "careers_url": "https://jobs.lever.co/figma",
+        "description": "Collaborative interface design platform",
+        "logo_url": "https://logo.clearbit.com/figma.com",
+    },
+    {
+        "name": "Netlify",
+        "slug": "netlify",
+        "careers_url": "https://www.netlify.com/careers",
+        "description": "Web development and deployment platform",
+        "logo_url": "https://logo.clearbit.com/netlify.com",
+    },
     # Aggregator - catches remote jobs from companies we don't track individually
     {
         "name": "Remotive",
@@ -184,6 +198,22 @@ JOB_SOURCES = [
         "url": "https://api.lever.co/v0/postings/plaid",
         "scraper_class": "lever",
         "config": {"company_slug": "plaid"},
+        "scrape_interval_minutes": 30,
+    },
+    {
+        "company_slug": "figma",
+        "source_type": "ats_api",
+        "url": "https://api.lever.co/v0/postings/figma",
+        "scraper_class": "lever",
+        "config": {"company_slug": "figma"},
+        "scrape_interval_minutes": 30,
+    },
+    {
+        "company_slug": "netlify",
+        "source_type": "ats_api",
+        "url": "https://api.lever.co/v0/postings/netlify",
+        "scraper_class": "lever",
+        "config": {"company_slug": "netlify"},
         "scrape_interval_minutes": 30,
     },
     # Remotive aggregator - catches remote jobs from companies we don't track

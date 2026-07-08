@@ -2,41 +2,48 @@
 API dependencies for dependency injection.
 """
 from typing import Optional
-from fastapi import Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastapi import Depends, Request
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import decode_token, verify_token_type
+from app.core.denylist import is_access_revoked
 from app.core.exceptions import (
-    UnauthorizedException,
-    InvalidTokenException,
     ForbiddenException,
+    InvalidTokenException,
+    TokenRevokedException,
+    UnauthorizedException,
 )
+from app.core.security import decode_token, verify_token_type
 from app.models.user import User
 
-
-# Security scheme
-security = HTTPBearer(auto_error=False)
+# OAuth2 password flow — makes Swagger's Authorize button work end-to-end.
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/v1/auth/login",
+    auto_error=False,
+)
 
 
 async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """
     Get the current authenticated user.
 
-    Raises:
-        UnauthorizedException: If no token provided
-        InvalidTokenException: If token is invalid
-        TokenExpiredException: If token has expired
+    Validates: token presence → signature/exp → type=access → jti/sid claims
+    (legacy tokens without them are rejected) → Redis revocation markers →
+    active user in DB.
+
+    Side effect: sets request.state.current_user and request.state.token_payload
+    so the rate limiter keys by user id and routes can read the session id.
     """
-    if not credentials:
+    if not token:
         raise UnauthorizedException("Authentication required")
 
-    token = credentials.credentials
     payload = decode_token(token)
 
     if not payload:
@@ -46,17 +53,27 @@ async def get_current_user(
         raise InvalidTokenException()
 
     user_id = payload.get("sub")
-    if not user_id:
+    jti = payload.get("jti")
+    sid = payload.get("sid")
+    if not user_id or not jti or not sid:
+        # Tokens minted before the session model existed
         raise InvalidTokenException()
+
+    if await is_access_revoked(jti, sid):
+        raise TokenRevokedException()
 
     # Fetch user from database
     result = await db.execute(
-        select(User).where(User.id == user_id, User.is_active == True)
+        select(User).where(User.id == user_id, User.is_active == True)  # noqa: E712
     )
     user = result.scalar_one_or_none()
 
     if not user:
         raise InvalidTokenException()
+
+    # Expose auth context for rate limiting and session-aware routes
+    request.state.current_user = user
+    request.state.token_payload = payload
 
     return user
 
@@ -85,17 +102,18 @@ async def get_admin_user(
 
 
 async def get_optional_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> Optional[User]:
     """
     Get the current user if authenticated, None otherwise.
     Useful for endpoints that work with or without authentication.
     """
-    if not credentials:
+    if not token:
         return None
 
     try:
-        return await get_current_user(credentials, db)
+        return await get_current_user(request, token, db)
     except UnauthorizedException:
         return None

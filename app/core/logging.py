@@ -3,8 +3,10 @@ Structured logging configuration using structlog.
 
 - Production: JSON lines (machine-readable, compatible with log aggregators)
 - Development: Pretty-printed console output with colors
+- Secret redaction: API keys and tokens are stripped from ALL log output
 """
 import logging
+import re
 import sys
 import uuid
 
@@ -13,6 +15,24 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from app.core.config import settings
+
+# Patterns that must never appear in log output.
+_SECRET_RE = re.compile(
+    r"(AIza[0-9A-Za-z_-]{35}|"       # Google / Gemini API key
+    r"sk-[a-zA-Z0-9]{20,}|"          # OpenAI-style key
+    r"AKIA[0-9A-Z]{16}|"             # AWS access key ID
+    r"(?<=[=: \"])[A-Za-z0-9/+=]{40,}(?=[\" ,}\n])|"  # generic long secrets
+    r"key[=:]\\s*\\S+)",              # key=value in error messages
+    re.IGNORECASE,
+)
+
+
+def _redact_secrets(logger, method_name, event_dict):
+    """Structlog processor: scrub API keys from every log value."""
+    for key, value in event_dict.items():
+        if isinstance(value, str) and _SECRET_RE.search(value):
+            event_dict[key] = _SECRET_RE.sub("[REDACTED]", value)
+    return event_dict
 
 
 def setup_logging() -> None:
@@ -23,6 +43,7 @@ def setup_logging() -> None:
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
+        _redact_secrets,
     ]
 
     if settings.environment == "development":

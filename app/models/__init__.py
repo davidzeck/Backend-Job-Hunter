@@ -15,6 +15,8 @@ from app.models.user_job_alert import UserJobAlert
 from app.models.scrape_log import ScrapeLog
 from app.models.cv_chunk import CVChunk
 from app.models.cv_analysis import CVAnalysis
+from app.models.auth_session import AuthSession
+from app.models.email_token import EmailToken
 
 __all__ = [
     "BaseModel",
@@ -31,4 +33,6 @@ __all__ = [
     "ScrapeLog",
     "CVChunk",
     "CVAnalysis",
+    "AuthSession",
+    "EmailToken",
 ]

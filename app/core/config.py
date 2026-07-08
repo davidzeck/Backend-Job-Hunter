@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
+    # Auth sessions (rotating refresh tokens)
+    refresh_cookie_name: str = "jobscout_refresh"
+    refresh_reuse_grace_seconds: int = 60   # concurrent-refresh race window
+    session_absolute_max_days: int = 30     # hard cap on a login session's lifetime
+    password_reset_expire_minutes: int = 60
+    email_verification_expire_hours: int = 24
+    frontend_base_url: str = "http://localhost:3000"  # email link base
+
     # Firebase Cloud Messaging
     fcm_credentials_path: Optional[str] = None
 
@@ -78,16 +86,21 @@ class Settings(BaseSettings):
     s3_presign_upload_expires: int = 900    # 15 min — client must upload within this window
     s3_presign_download_expires: int = 3600  # 1 h — download link TTL
 
-    # OpenAI (AI/ATS layer)
-    openai_api_key: Optional[str] = None
-    openai_embedding_model: str = "text-embedding-3-small"
-    openai_chat_model: str = "gpt-4o-mini"
-    openai_max_tokens_analysis: int = 1500
-    openai_max_tokens_tailor: int = 2000
+    # Google Gemini (AI/ATS layer)
+    gemini_api_key: Optional[str] = None
+    gemini_embedding_model: str = "text-embedding-004"
+    gemini_chat_model: str = "gemini-2.0-flash"
+    gemini_max_tokens_analysis: int = 1500
+    gemini_max_tokens_tailor: int = 2000
 
     @property
     def max_cv_size_bytes(self) -> int:
         return self.max_cv_size_mb * 1024 * 1024
+
+    @property
+    def cookie_secure(self) -> bool:
+        """Secure cookies everywhere except plain-http local development."""
+        return self.environment != "development"
 
     @model_validator(mode="after")
     def _reject_dev_secrets_in_production(self) -> "Settings":
@@ -100,6 +113,12 @@ class Settings(BaseSettings):
                         f"SECURITY: '{field_name}' is still set to its development default. "
                         f"Set a real value via environment variable in {self.environment}."
                     )
+            # AI key is required in production (not optional like dev)
+            if not self.gemini_api_key:
+                raise ValueError(
+                    "SECURITY: 'gemini_api_key' must be set in production/staging. "
+                    "AI features will not function without it."
+                )
         return self
 
 

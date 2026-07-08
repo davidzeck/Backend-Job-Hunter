@@ -45,6 +45,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.scheduler.cleanup_old_scrape_logs",
         "schedule": crontab(hour=3, minute=0),
     },
+    "cleanup-expired-cv-analyses": {
+        "task": "app.workers.scheduler.cleanup_expired_cv_analyses",
+        "schedule": crontab(hour=4, minute=0),
+    },
+    "cleanup-auth-tokens": {
+        "task": "app.workers.scheduler.cleanup_auth_tokens",
+        "schedule": crontab(hour=4, minute=30),
+    },
 }
 
 
@@ -120,3 +128,69 @@ async def _cleanup_old_scrape_logs():
         await db.commit()
 
         return {"deleted": result.rowcount}
+
+
+@celery_app.task
+def cleanup_expired_cv_analyses():
+    """Delete cv_analyses rows past their expires_at to prevent table bloat."""
+    return run_async(_cleanup_expired_cv_analyses())
+
+
+async def _cleanup_expired_cv_analyses():
+    from datetime import datetime, timezone
+    from sqlalchemy import delete
+    from app.models.cv_analysis import CVAnalysis
+
+    async with async_session_maker() as db:
+        now = datetime.now(timezone.utc)
+        result = await db.execute(
+            delete(CVAnalysis).where(CVAnalysis.expires_at < now)
+        )
+        await db.commit()
+
+        return {"deleted": result.rowcount}
+
+
+@celery_app.task
+def cleanup_auth_tokens():
+    """
+    Purge dead auth rows:
+      - auth_sessions more than 1 day past expiry (replaced rows are kept
+        until expiry so a late replay of a rotated token still trips family
+        revocation — see AuthService.refresh)
+      - email_tokens that are long expired or were used over a week ago
+    """
+    return run_async(_cleanup_auth_tokens())
+
+
+async def _cleanup_auth_tokens():
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import delete, or_, and_
+    from app.models.auth_session import AuthSession
+    from app.models.email_token import EmailToken
+
+    async with async_session_maker() as db:
+        now = datetime.now(timezone.utc)
+
+        sessions_result = await db.execute(
+            delete(AuthSession).where(
+                AuthSession.expires_at < now - timedelta(days=1)
+            )
+        )
+        tokens_result = await db.execute(
+            delete(EmailToken).where(
+                or_(
+                    EmailToken.expires_at < now - timedelta(days=7),
+                    and_(
+                        EmailToken.used_at.isnot(None),
+                        EmailToken.used_at < now - timedelta(days=7),
+                    ),
+                )
+            )
+        )
+        await db.commit()
+
+        return {
+            "sessions_deleted": sessions_result.rowcount,
+            "email_tokens_deleted": tokens_result.rowcount,
+        }

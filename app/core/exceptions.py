@@ -114,6 +114,26 @@ class InvalidTokenException(UnauthorizedException):
         )
 
 
+class TokenRevokedException(UnauthorizedException):
+    """Token belongs to a revoked session"""
+
+    def __init__(self):
+        super().__init__(
+            message="Session has been revoked",
+            code="TOKEN_REVOKED",
+        )
+
+
+class TokenReuseException(UnauthorizedException):
+    """A rotated refresh token was presented again (possible theft)"""
+
+    def __init__(self):
+        super().__init__(
+            message="Invalid token",  # do not leak detection details to clients
+            code="INVALID_TOKEN",
+        )
+
+
 # Resource specific exceptions
 class UserNotFoundException(NotFoundException):
     """User not found"""

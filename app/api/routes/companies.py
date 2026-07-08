@@ -12,7 +12,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_admin_user, get_current_user
 from app.models.user import User
 from app.models.company import Company
 from app.models.job import Job
@@ -67,7 +67,7 @@ async def list_companies(
 @router.post("/", response_model=CompanyResponse, status_code=201)
 async def create_company(
     data: CompanyCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new company."""
@@ -113,7 +113,7 @@ async def get_company(
 async def update_company(
     company_id: UUID,
     data: CompanyUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a company's details."""
@@ -144,7 +144,7 @@ async def update_company(
 @router.delete("/{company_id}", response_model=MessageResponse)
 async def delete_company(
     company_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Soft-delete a company (sets is_active=False)."""

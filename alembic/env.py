@@ -25,6 +25,10 @@ from app.models import (  # noqa: F401
     JobSkill,
     UserJobAlert,
     ScrapeLog,
+    CVChunk,
+    CVAnalysis,
+    AuthSession,
+    EmailToken,
 )
 
 # Alembic Config object

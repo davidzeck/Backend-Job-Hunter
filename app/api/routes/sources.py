@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_admin_user, get_current_user
 from app.models.user import User
 from app.models.job_source import JobSource
 from app.models.job import Job
@@ -23,7 +23,12 @@ from app.models.scrape_log import ScrapeLog
 from app.schemas.base import PaginatedResponse, MessageResponse
 from app.schemas.company import CompanyBase
 
-router = APIRouter(prefix="/sources", tags=["sources"])
+# Entire scraper-source surface is operations/admin only
+router = APIRouter(
+    prefix="/sources",
+    tags=["sources"],
+    dependencies=[Depends(get_admin_user)],
+)
 
 
 # ─── Schemas ────────────────────────────────────────────────────
