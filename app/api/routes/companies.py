@@ -55,6 +55,8 @@ async def _build_company_response(company: Company, db: AsyncSession) -> Company
     )
 
 
+# "" aliases: avoid the 307 trailing-slash redirect (drops auth cross-origin)
+@router.get("", include_in_schema=False, response_model=List[CompanyResponse])
 @router.get("/", response_model=List[CompanyResponse])
 async def list_companies(
     current_user: User = Depends(get_current_user),
@@ -64,6 +66,7 @@ async def list_companies(
     return await company_service.list_companies(db)
 
 
+@router.post("", include_in_schema=False, response_model=CompanyResponse, status_code=201)
 @router.post("/", response_model=CompanyResponse, status_code=201)
 async def create_company(
     data: CompanyCreate,

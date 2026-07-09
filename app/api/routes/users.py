@@ -13,7 +13,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.rate_limit import limiter, RATE_CV_UPLOAD, RATE_AI, RATE_TASK_POLL, check_ai_daily_cap
+from app.core.rate_limit import (
+    limiter,
+    RATE_CV_UPLOAD,
+    RATE_AI,
+    RATE_TASK_POLL,
+    check_ai_daily_cap,
+    get_ai_usage,
+)
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.user_skill import UserSkill
@@ -246,6 +253,31 @@ async def delete_cv(
 
 # ── CV AI/ATS Analysis ───────────────────────────────────────────────────────
 
+_AI_LIMIT_MESSAGE = (
+    "Daily AI limit reached. Top up your plan to raise the limit, "
+    "or wait for the daily reset."
+)
+
+
+class AIUsageResponse(BaseModel):
+    """Current user's daily AI quota snapshot (drives the dashboard banner)."""
+
+    used: int
+    limit: int
+    remaining: int
+    warn: bool        # nearing the limit — show an amber heads-up
+    exhausted: bool   # limit hit — AI features blocked until reset/top-up
+    resets_in_seconds: int | None = None
+
+
+@router.get("/me/ai-usage", response_model=AIUsageResponse)
+async def ai_usage(
+    current_user: User = Depends(get_current_user),
+):
+    """Daily AI usage for the current user (analyze/tailor calls)."""
+    return await get_ai_usage(str(current_user.id))
+
+
 @router.post("/me/cv/{cv_id}/analyze", response_model=CVTaskStatusResponse)
 @limiter.limit(RATE_AI)
 async def analyze_cv(
@@ -263,7 +295,7 @@ async def analyze_cv(
     Rate limited to 10/hour + 50/day per user (Gemini cost control).
     """
     if not await check_ai_daily_cap(str(current_user.id)):
-        raise HTTPException(status_code=429, detail="Daily AI usage limit reached. Try again tomorrow.")
+        raise HTTPException(status_code=429, detail=_AI_LIMIT_MESSAGE)
     return await cv_service.start_analysis(db, current_user.id, cv_id, req.job_id)
 
 
@@ -284,7 +316,7 @@ async def tailor_cv_endpoint(
     Rate limited to 10/hour + 50/day per user (Gemini cost control).
     """
     if not await check_ai_daily_cap(str(current_user.id)):
-        raise HTTPException(status_code=429, detail="Daily AI usage limit reached. Try again tomorrow.")
+        raise HTTPException(status_code=429, detail=_AI_LIMIT_MESSAGE)
     return await cv_service.start_tailor(db, current_user.id, cv_id, req.job_id)
 
 

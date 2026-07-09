@@ -12,22 +12,13 @@ WHY Celery Beat instead of cron?
 - Beat is version-controlled with the code
 - Beat runs inside Docker, no host system dependency
 """
-import asyncio
-
 from celery.schedules import crontab
 
 from app.workers.celery_app import celery_app
 from app.core.database import async_session_maker
-
-
-def run_async(coro):
-    """Helper to run async code in sync Celery tasks."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+# Single shared bridge — disposes the engine per task so pooled connections
+# never leak across event loops (see run_async docstring in tasks.py).
+from app.workers.tasks import run_async
 
 
 # ─── Periodic Task Schedule ────────────────────────────────────

@@ -81,3 +81,29 @@ async def get_ai_daily_usage(user_id: str) -> int:
     r = _get_redis()
     val = await r.get(f"{_DAILY_AI_KEY_PREFIX}{user_id}")
     return int(val) if val else 0
+
+
+# Warn the user when this many calls (or fewer) remain in the daily cap.
+AI_WARN_THRESHOLD = 10
+
+
+async def get_ai_usage(user_id: str) -> dict:
+    """
+    Usage snapshot for the client: used/limit/remaining, whether we're in the
+    warning zone, and seconds until the counter resets (key TTL; None if the
+    user hasn't made a call today).
+    """
+    r = _get_redis()
+    key = f"{_DAILY_AI_KEY_PREFIX}{user_id}"
+    val = await r.get(key)
+    used = int(val) if val else 0
+    remaining = max(_DAILY_AI_CAP - used, 0)
+    ttl = await r.ttl(key)  # -2 = no key, -1 = no TTL
+    return {
+        "used": used,
+        "limit": _DAILY_AI_CAP,
+        "remaining": remaining,
+        "warn": 0 < remaining <= AI_WARN_THRESHOLD,
+        "exhausted": remaining == 0,
+        "resets_in_seconds": ttl if ttl and ttl > 0 else None,
+    }

@@ -153,6 +153,8 @@ async def _build_response(
 # ─── Routes ─────────────────────────────────────────────────────
 
 
+# "" aliases: avoid the 307 trailing-slash redirect (drops auth cross-origin)
+@router.get("", include_in_schema=False, response_model=PaginatedResponse[JobSourceResponse])
 @router.get("/", response_model=PaginatedResponse[JobSourceResponse])
 async def list_sources(
     page: int = Query(1, ge=1),
@@ -193,6 +195,7 @@ async def list_sources(
     )
 
 
+@router.post("", include_in_schema=False, response_model=JobSourceResponse, status_code=201)
 @router.post("/", response_model=JobSourceResponse, status_code=201)
 async def create_source(
     data: JobSourceCreate,

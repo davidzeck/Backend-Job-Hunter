@@ -40,6 +40,22 @@ _SECRET_PATTERN = re.compile(
 )
 
 
+class AIQuotaExceededError(RuntimeError):
+    """Gemini refused the call because the project's quota is exhausted (429).
+
+    Distinguished from generic failures so the client can tell the user to
+    top up billing or wait for the provider's daily reset, instead of
+    "try again" (which would just fail again).
+    """
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """True when Gemini returned 429 RESOURCE_EXHAUSTED (quota, not a bug)."""
+    if getattr(exc, "code", None) == 429 or getattr(exc, "status_code", None) == 429:
+        return True
+    return "RESOURCE_EXHAUSTED" in str(exc)
+
+
 def _sanitize_error(exc: Exception) -> str:
     """Return a safe error string for logging — redacts API keys and secrets."""
     msg = str(exc)
@@ -90,7 +106,7 @@ def _safe_parse_json(raw: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
 async def generate_embedding(text: str) -> List[float]:
     """
     Generate a single embedding vector for the given text.
-    Returns a 768-d float list (text-embedding-004).
+    Returns a float list (gemini-embedding-001, 3072-d).
     """
     text = _truncate(text.strip(), _MAX_EMBEDDING_CHARS)
     try:
@@ -102,6 +118,8 @@ async def generate_embedding(text: str) -> List[float]:
         return list(response.embeddings[0].values)
     except Exception as exc:
         logger.error("gemini_api_error", endpoint="embeddings", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
         raise RuntimeError("Embedding generation failed") from exc
 
 
@@ -122,6 +140,8 @@ async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
         return [list(emb.values) for emb in response.embeddings]
     except Exception as exc:
         logger.error("gemini_api_error", endpoint="embeddings_batch", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
         raise RuntimeError("Batch embedding generation failed") from exc
 
 
@@ -169,6 +189,9 @@ async def extract_keywords_from_jd(job_description: str) -> Dict[str, Any]:
                 temperature=0.0,
                 max_output_tokens=settings.gemini_max_tokens_analysis,
                 response_mime_type="application/json",
+                # 2.5-flash "thinks" by default and thinking tokens count against
+                # max_output_tokens — disable it so structured JSON isn't starved
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = response.text or ""
@@ -181,6 +204,8 @@ async def extract_keywords_from_jd(job_description: str) -> Dict[str, Any]:
 
     except Exception as exc:
         logger.error("gemini_api_error", endpoint="extract_keywords", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
         raise RuntimeError("Keyword extraction failed") from exc
 
 
@@ -241,6 +266,9 @@ async def analyze_cv_against_jd(
                 temperature=0.0,
                 max_output_tokens=settings.gemini_max_tokens_analysis,
                 response_mime_type="application/json",
+                # 2.5-flash "thinks" by default and thinking tokens count against
+                # max_output_tokens — disable it so structured JSON isn't starved
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = response.text or ""
@@ -266,6 +294,8 @@ async def analyze_cv_against_jd(
 
     except Exception as exc:
         logger.error("gemini_api_error", endpoint="analyze_cv", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
         raise RuntimeError("CV analysis failed") from exc
 
 
@@ -334,6 +364,7 @@ async def tailor_cv_section(
                 temperature=0.3,
                 max_output_tokens=settings.gemini_max_tokens_tailor,
                 response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = response.text or ""
@@ -352,4 +383,6 @@ async def tailor_cv_section(
 
     except Exception as exc:
         logger.error("gemini_api_error", endpoint="tailor_cv", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
         raise RuntimeError("CV tailoring failed") from exc

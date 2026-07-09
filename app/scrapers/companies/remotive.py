@@ -28,7 +28,6 @@ WHY include an aggregator?
 """
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from html import unescape
 import re
 
 from app.scrapers.base import APIScraper, ScrapedJob
@@ -153,15 +152,7 @@ class RemotiveAPIScraper(APIScraper):
 
     # ─── Helper methods ───────────────────────────────────────────
 
-    @staticmethod
-    def _strip_html(html: str) -> str:
-        """Remove HTML tags and decode entities."""
-        if not html:
-            return ""
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = unescape(text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+    # _strip_html inherited from BaseScraper (unescape-first, structure-preserving)
 
     @staticmethod
     def _map_job_type(job_type: str) -> str:

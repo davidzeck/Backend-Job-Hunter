@@ -28,6 +28,10 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 job_service = JobService()
 
 
+# "" alias: serve /jobs without the trailing slash. Otherwise FastAPI 307s to an
+# absolute backend URL, and browsers drop Authorization on that cross-origin hop
+# (breaks the dashboard's same-origin proxy).
+@router.get("", include_in_schema=False, response_model=PaginatedResponse[JobListItem])
 @router.get("/", response_model=PaginatedResponse[JobListItem])
 async def list_jobs(
     company: Optional[List[str]] = Query(None, description="Company slugs"),

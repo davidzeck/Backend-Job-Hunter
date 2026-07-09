@@ -25,12 +25,23 @@ def run_async(coro):
     Celery workers are synchronous. Our services are async (because
     SQLAlchemy async requires it). This bridge creates an event loop,
     runs the coroutine, and cleans up.
+
+    The engine dispose is load-bearing: the module-level engine pools
+    connections bound to THIS loop. The next task runs on a new loop, and
+    reusing a pooled connection across loops raises asyncpg
+    "cannot perform operation: another operation is in progress".
     """
+    from app.core.database import engine
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
+        try:
+            loop.run_until_complete(engine.dispose())
+        except Exception:
+            pass  # dispose is best-effort; never mask the task result
         loop.close()
 
 
@@ -264,11 +275,24 @@ async def _process_cv(user_id: str, cv_id: str):
 # ── CV Analysis Task ──────────────────────────────────────────────────────────
 
 
+# Shown when the AI provider itself is out of quota (distinct from our per-user
+# daily cap, which is enforced at the API layer before a task is ever enqueued).
+_AI_QUOTA_MESSAGE = (
+    "AI quota exhausted for today. Top up your AI plan, "
+    "or try again after the daily reset."
+)
+
+
 @celery_app.task(bind=True, max_retries=1, queue="cv_processing")
 def analyze_cv_for_job(self, user_id: str, cv_id: str, job_id: str):
     """Analyze a CV against a job description. Returns analysis result dict."""
+    from app.core.ai import AIQuotaExceededError
+
     try:
         return run_async(_analyze_cv_for_job(user_id, cv_id, job_id))
+    except AIQuotaExceededError:
+        logger.warning("analyze_task_quota", cv_id=cv_id, job_id=job_id)
+        return {"error": _AI_QUOTA_MESSAGE}
     except Exception as exc:
         logger.error("analyze_task_failed", cv_id=cv_id, job_id=job_id, exc_info=True)
         return {"error": "Analysis failed. Please try again."}
@@ -370,8 +394,13 @@ async def _analyze_cv_for_job(user_id: str, cv_id: str, job_id: str) -> dict:
 @celery_app.task(bind=True, max_retries=1, queue="cv_processing")
 def tailor_cv(self, user_id: str, cv_id: str, job_id: str):
     """Tailor CV summary + skills for a specific job. Always runs fresh."""
+    from app.core.ai import AIQuotaExceededError
+
     try:
         return run_async(_tailor_cv(user_id, cv_id, job_id))
+    except AIQuotaExceededError:
+        logger.warning("tailor_task_quota", cv_id=cv_id, job_id=job_id)
+        return {"error": _AI_QUOTA_MESSAGE}
     except Exception as exc:
         logger.error("tailor_task_failed", cv_id=cv_id, job_id=job_id, exc_info=True)
         return {"error": "Tailoring failed. Please try again."}

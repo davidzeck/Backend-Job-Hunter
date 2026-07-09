@@ -2,7 +2,7 @@
 CVChunk model — stores text chunks + embeddings from processed CVs.
 
 Each CV is split into overlapping chunks (~2000 chars each) after text extraction.
-Embeddings are generated via Gemini text-embedding-004 and stored as JSONB arrays.
+Embeddings are generated via Gemini gemini-embedding-001 and stored as JSONB arrays.
 When GEMINI_API_KEY is not set, chunks are stored without embeddings.
 """
 import uuid
@@ -40,7 +40,7 @@ class CVChunk(BaseModel):
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Embedding vector stored as JSON array of floats
-    # 768-d for Gemini text-embedding-004. Nullable — None when no API key.
+    # 3072-d for gemini-embedding-001. Nullable — None when no API key.
     embedding: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
 
     # Heuristic section label: summary, experience, skills, education, certification, other

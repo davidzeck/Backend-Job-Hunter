@@ -206,6 +206,37 @@ class BaseScraper(ABC):
         """Get a random user agent for request rotation."""
         return random.choice(self.USER_AGENTS)
 
+    @staticmethod
+    def _strip_html(html: str) -> str:
+        """
+        Convert (possibly HTML-escaped) HTML to clean, readable plain text.
+
+        Order matters: unescape FIRST — Greenhouse returns the description as
+        HTML-escaped HTML (&lt;div&gt;…), so stripping tags before unescaping
+        finds nothing and the raw HTML ends up in the DB.
+
+        Keeps structure the dashboard renders: block-level tags become newlines
+        and <li> becomes "- " bullets.
+        """
+        import re
+        from html import unescape
+
+        if not html:
+            return ""
+        text = unescape(html)  # &lt;div&gt; -> <div> (no-op for plain HTML)
+        # Preserve structure before stripping tags
+        text = re.sub(r"<li[^>]*>", "\n- ", text, flags=re.I)
+        text = re.sub(r"<(?:br|/p|/div|/li|/ul|/ol|/h[1-6]|/tr)[^>]*>", "\n", text, flags=re.I)
+        # Strip all remaining tags
+        text = re.sub(r"<[^>]+>", " ", text)
+        # Entities that were inside the text itself (&amp;, &nbsp;, …)
+        text = unescape(text)
+        # Collapse horizontal whitespace, then squeeze blank lines
+        text = re.sub(r"[ \t\xa0]+", " ", text)
+        text = re.sub(r" ?\n ?", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
 
 class StaticScraper(BaseScraper):
     """

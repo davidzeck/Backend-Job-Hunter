@@ -27,7 +27,7 @@ The 4-hex prefix gives 65 536 shards for S3 partition performance. Bucket: `jobs
 1. Download bytes from S3.
 2. **Text extraction**: `pdfplumber`; full text cached on `user_cvs.full_text` (so re-analysis never re-parses the PDF).
 3. **Chunking**: `_chunk_text` — 2000 chars per chunk, 200 overlap, paragraph-aware splits; `_detect_section` labels chunks (experience/education/skills/…).
-4. **Embeddings**: Gemini `text-embedding-004` (768-d) per chunk, batched; stored as JSONB on `cv_chunks.embedding`. **Skipped gracefully when `GEMINI_API_KEY` is unset** — chunks still stored, embedding null. ⚠️ Nothing consumes these vectors yet (no similarity search / pgvector — [known issue #16](../../docs/known-issues.md)).
+4. **Embeddings**: Gemini `gemini-embedding-001` (3072-d) per chunk, batched; stored as JSONB on `cv_chunks.embedding`. **Skipped gracefully when `GEMINI_API_KEY` is unset** — chunks still stored, embedding null. ⚠️ Nothing consumes these vectors yet (no similarity search / pgvector — [known issue #16](../../docs/known-issues.md)).
 5. **Skill extraction** (non-AI, deterministic): `_extract_skills_from_text` keyword-matches against `SKILLS_TAXONOMY` (in `tasks.py`); results upserted into `user_skills` with `pg_insert().on_conflict_do_update(constraint="uq_user_skill")`.
 6. Status → `ready` (or `failed` with the error logged; the client sees a sanitized message).
 
@@ -35,7 +35,7 @@ The 4-hex prefix gives 65 536 shards for S3 partition performance. Bucket: `jobs
 
 **Cache-first**: `POST /users/me/cv/{cv_id}/analyze {job_id}` checks `cv_analyses` for a row < 24 h old for this (cv, job) — if found, returns it synchronously; otherwise enqueues and returns a `task_id` to poll.
 
-Worker steps (via [`app/core/ai.py`](../app/core/ai.py), model `gemini-2.0-flash`):
+Worker steps (via [`app/core/ai.py`](../app/core/ai.py), model `gemini-2.5-flash`):
 1. `extract_keywords_from_jd(job.description)` → structured keyword list (snapshotted to `jd_keywords_snapshot`).
 2. `analyze_cv_against_jd(cv.full_text, jd_keywords)` → `match_score` (clamped 0–100), `present_keywords`, `missing_keywords`, `suggested_additions`.
 3. Persist to `cv_analyses` with `expires_at = now + 24h` (nightly Beat purge).
@@ -48,10 +48,10 @@ Always async, never cached. Reuses cached `missing_keywords` when a fresh analys
 
 | Function | Model | Purpose |
 |---|---|---|
-| `generate_embedding` / `generate_embeddings_batch` | `text-embedding-004` | CV chunk vectors |
-| `extract_keywords_from_jd` | `gemini-2.0-flash` | JD → JSON keywords |
-| `analyze_cv_against_jd` | `gemini-2.0-flash` | Gap analysis, clamped score |
-| `tailor_cv_section` | `gemini-2.0-flash` | Rewrite summary/skills, no-fabrication rules |
+| `generate_embedding` / `generate_embeddings_batch` | `gemini-embedding-001` | CV chunk vectors |
+| `extract_keywords_from_jd` | `gemini-2.5-flash` | JD → JSON keywords |
+| `analyze_cv_against_jd` | `gemini-2.5-flash` | Gap analysis, clamped score |
+| `tailor_cv_section` | `gemini-2.5-flash` | Rewrite summary/skills, no-fabrication rules |
 
 Defensive layers baked in:
 - **Input truncation**: CV text capped ~30k chars, JD ~15k before hitting the API (prompt-injection/cost bound).

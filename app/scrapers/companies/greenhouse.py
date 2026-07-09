@@ -22,7 +22,6 @@ WHY Greenhouse is a great scraping target:
 """
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from html import unescape
 import re
 
 from app.scrapers.base import APIScraper, ScrapedJob
@@ -140,18 +139,7 @@ class GreenhouseAPIScraper(APIScraper):
 
     # ─── Helper methods ───────────────────────────────────────────
 
-    @staticmethod
-    def _strip_html(html: str) -> str:
-        """Remove HTML tags and decode entities. Keep it readable."""
-        if not html:
-            return ""
-        # Remove tags
-        text = re.sub(r"<[^>]+>", " ", html)
-        # Decode HTML entities (&amp; -> &, etc.)
-        text = unescape(text)
-        # Collapse whitespace
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+    # _strip_html inherited from BaseScraper (unescape-first, structure-preserving)
 
     @staticmethod
     def _infer_location_type(location: str) -> str:

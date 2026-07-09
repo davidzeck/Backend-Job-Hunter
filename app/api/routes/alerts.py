@@ -20,6 +20,8 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 alert_service = AlertService()
 
 
+# "" alias: avoid the 307 trailing-slash redirect (drops auth cross-origin)
+@router.get("", include_in_schema=False, response_model=PaginatedResponse[AlertResponse])
 @router.get("/", response_model=PaginatedResponse[AlertResponse])
 async def list_alerts(
     unread_only: bool = Query(False, description="Show only unread alerts"),

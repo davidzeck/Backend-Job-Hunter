@@ -76,6 +76,7 @@ Upload rules: PDF only, ≤5 MB (enforced in presign *and* the S3 POST policy). 
 | `POST /users/me/cv/{cv_id}/analyze` | 🔒 | **10/hour + 50/day** | `CVAnalyzeRequest {job_id}` | `CVTaskStatusResponse` — cached `CVAnalysisResponse` inline if <24 h old, else `{task_id, status: pending}` |
 | `POST /users/me/cv/{cv_id}/tailor` | 🔒 | **10/hour + 50/day** | `{job_id}` | `CVTaskStatusResponse {task_id}` — always async |
 | `GET /users/me/cv/tasks/{task_id}` | 🔒 | 60/min | — | `CVTaskStatusResponse {status: pending\|started\|success\|failure, result?}` |
+| `GET /users/me/ai-usage` | 🔒 | — | — | `AIUsageResponse {used, limit, remaining, warn, exhausted, resets_in_seconds}` — drives the dashboard's nearing-limit / limit-reached banner |
 
 The daily cap returns 429 `"Daily AI usage limit reached. Try again tomorrow."` — it's a Redis counter separate from the hourly slowapi limit. Clients poll task status every ~2 s until terminal.
 
@@ -132,6 +133,10 @@ Scraper-source administration (dashboard's Sources pages). 👑 **Admin-only at 
 | Method & path | Auth | Response |
 |---|---|---|
 | `GET /dashboard/stats` | 👑 | `DashboardStats` (totals for jobs/sources/alerts, powers the dashboard overview cards); 403 for non-admins |
+| `GET /dashboard/jobs-timeline?days=7` | 👑 | `[{date, jobs, new_jobs}]` — new + cumulative jobs per day |
+| `GET /dashboard/scrape-activity?hours=24` | 👑 | `[{hour, scrapes, success, failed}]` — scrape-log activity by hour |
+| `GET /dashboard/source-performance` | 👑 | `{data:{active,error,paused,inactive}, success_rate}` — source health buckets + recent success rate |
+| `GET /dashboard/activity?limit=15` | 👑 | `[ActivityItem]` — recent scrape-log activity feed |
 
 ## Health — [`routes/health.py`](../app/api/routes/health.py)
 

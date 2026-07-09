@@ -88,8 +88,10 @@ class Settings(BaseSettings):
 
     # Google Gemini (AI/ATS layer)
     gemini_api_key: Optional[str] = None
-    gemini_embedding_model: str = "text-embedding-004"
-    gemini_chat_model: str = "gemini-2.0-flash"
+    # text-embedding-004 was retired by Google (404s); gemini-embedding-001 is
+    # the current model (3072-dim vs the old 768 — JSONB storage, no consumer yet)
+    gemini_embedding_model: str = "gemini-embedding-001"
+    gemini_chat_model: str = "gemini-2.5-flash"
     gemini_max_tokens_analysis: int = 1500
     gemini_max_tokens_tailor: int = 2000
 
