@@ -94,6 +94,30 @@ class Job(BaseModel):
     # Status
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
+    # Validation (see app/services/validation_service.py). Independent of
+    # is_active: `dead` is excluded from feeds/alerts; `suspect` shows with
+    # reduced trust + an admin review queue; `valid`/`unverified` behave normally.
+    validation_status: Mapped[str] = mapped_column(
+        String(20),
+        default="unverified",
+        server_default="unverified",
+        nullable=False,
+        index=True,
+    )  # unverified | valid | suspect | dead
+    last_validated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    validation_detail: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )  # per-check outcomes, http status, final host
+    duplicate_of_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jobs.id"),
+        nullable=True,
+    )  # cross-source duplicate link (this job duplicates that one)
+
     # Raw data storage (for debugging)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 

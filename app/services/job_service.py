@@ -17,6 +17,7 @@ from app.schemas.job import (
     CompanyBrief,
     JobSkillResponse,
     JobInteractionResponse,
+    RecommendedJob,
     SkillGapResponse,
     SkillMatch,
     MissingSkill,
@@ -43,6 +44,7 @@ class JobService:
         role: Optional[str] = None,
         location_type: Optional[str] = None,
         days_ago: int = 7,
+        validation_status: Optional[str] = None,
         page: int = 1,
         limit: int = 20,
     ) -> PaginatedResponse[JobListItem]:
@@ -54,6 +56,7 @@ class JobService:
             role=role,
             location_type=location_type,
             days_ago=days_ago,
+            validation_status=validation_status,
             page=page,
             limit=limit,
         )
@@ -108,6 +111,7 @@ class JobService:
             posted_at=job.posted_at,
             discovered_at=job.discovered_at,
             is_active=job.is_active,
+            validation_status=job.validation_status,
             saved=saved,
             applied=applied,
             description=job.description,
@@ -127,6 +131,58 @@ class JobService:
                 )
                 for skill in job.skills
             ],
+        )
+
+    async def list_recommended(
+        self,
+        db: AsyncSession,
+        current_user_id: UUID,
+        *,
+        page: int = 1,
+        limit: int = 20,
+    ) -> PaginatedResponse[RecommendedJob]:
+        """Jobs ranked by weighted skill overlap with the user's CV skills.
+
+        Empty when the user has no skills (no CV / nothing extracted) — clients
+        detect that via has_cv/skills_count on the profile."""
+        user_skills = await self.user_repo.get_user_skills(db, current_user_id)
+        skill_names = [s.skill_name for s in user_skills]
+
+        ranked, total = await self.job_repo.find_recommended(
+            db, user_skill_names=skill_names, page=page, limit=limit
+        )
+        if not ranked:
+            return PaginatedResponse(
+                items=[], total=total, page=page, limit=limit,
+                pages=(total + limit - 1) // limit if total > 0 else 0,
+            )
+
+        job_ids = [job_id for job_id, _, _ in ranked]
+        job_map = await self.job_repo.get_many_with_company(db, job_ids)
+        interactions = await self._interaction_map(
+            db, current_user_id, list(job_map.values())
+        )
+
+        items: List[RecommendedJob] = []
+        for job_id, score, matched in ranked:  # preserve rank order
+            job = job_map.get(job_id)
+            if job is None:
+                continue
+            base = self._to_list_item(job, interactions)
+            items.append(
+                RecommendedJob(
+                    **base.model_dump(),
+                    match_score=round(score * 100, 1),
+                    matched_skills=matched,
+                )
+            )
+
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            page=page,
+            limit=limit,
+            pages=(total + limit - 1) // limit if total > 0 else 0,
         )
 
     async def list_saved_jobs(
@@ -297,6 +353,7 @@ class JobService:
             posted_at=job.posted_at,
             discovered_at=job.discovered_at,
             is_active=job.is_active,
+            validation_status=job.validation_status,
             saved=saved,
             applied=applied,
         )

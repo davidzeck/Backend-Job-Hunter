@@ -1,7 +1,7 @@
 """
 User repository - data access for User entity.
 """
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 from uuid import UUID
 
 from sqlalchemy import select, func
@@ -93,6 +93,26 @@ class UserRepository(BaseRepository[User]):
             select(UserSkill).where(UserSkill.user_id == user_id)
         )
         return list(result.scalars().all())
+
+    async def get_skills_for_users(
+        self,
+        db: AsyncSession,
+        user_ids: List[UUID],
+    ) -> Dict[UUID, Set[str]]:
+        """{user_id: {lowercased skill names}} for a batch of users (one query).
+
+        Used by skill-aware alert matching to avoid an N+1 over candidates."""
+        if not user_ids:
+            return {}
+        result = await db.execute(
+            select(UserSkill.user_id, UserSkill.skill_name).where(
+                UserSkill.user_id.in_(user_ids)
+            )
+        )
+        skill_map: Dict[UUID, Set[str]] = {}
+        for user_id, skill_name in result.all():
+            skill_map.setdefault(user_id, set()).add(skill_name.lower())
+        return skill_map
 
     async def count_skills(
         self,

@@ -265,6 +265,17 @@ class AuthService:
                 remaining = int(exp - _now().timestamp())
                 await denylist_access_jti(jti, remaining)
 
+            # A logged-out device must stop receiving pushes (shared devices).
+            sub = access_payload.get("sub")
+            if sub:
+                try:
+                    user = await self.user_repo.get_by_id(db, uuid.UUID(sub))
+                    if user and user.fcm_token:
+                        user.fcm_token = None
+                        await db.commit()
+                except Exception as exc:  # noqa: BLE001 — logout must not fail
+                    logger.warning("logout_fcm_clear_failed", error=str(exc))
+
         if family_to_mark:
             await revoke_session_marker(family_to_mark)
 

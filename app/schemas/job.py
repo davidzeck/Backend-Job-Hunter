@@ -42,9 +42,17 @@ class JobListItem(JobBase, IDSchema):
     posted_at: Optional[datetime] = None
     discovered_at: datetime
     is_active: bool
+    validation_status: str = "unverified"  # unverified | valid | suspect | dead
     # Current user's actions on this job (annotated per-request)
     saved: bool = False
     applied: bool = False
+
+
+class RecommendedJob(JobListItem):
+    """A job recommended to the user, with its skill-overlap score."""
+
+    match_score: float  # 0-100, weighted skill coverage
+    matched_skills: List[str] = []
 
 
 class SaveJobRequest(BaseSchema):

@@ -26,6 +26,7 @@ DEFAULT_PREFERENCES = {
     ],
     "locations": ["kenya", "remote"],
     "companies": [],  # Empty = all companies
+    "skill_alerts_enabled": True,  # also alert on CV-skill overlap, not just prefs
     "notifications": {
         "push": True,
         "email": True,

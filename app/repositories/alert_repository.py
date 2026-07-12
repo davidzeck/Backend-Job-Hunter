@@ -69,6 +69,23 @@ class AlertRepository(BaseRepository[UserJobAlert]):
         )
         return result.scalar_one_or_none()
 
+    async def find_alerted_user_ids(
+        self,
+        db: AsyncSession,
+        job_id: UUID,
+        user_ids: List[UUID],
+    ) -> set[UUID]:
+        """Which of these users already have an alert for this job (one query)."""
+        if not user_ids:
+            return set()
+        result = await db.execute(
+            select(UserJobAlert.user_id).where(
+                UserJobAlert.job_id == job_id,
+                UserJobAlert.user_id.in_(user_ids),
+            )
+        )
+        return set(result.scalars().all())
+
     async def count_unread(
         self,
         db: AsyncSession,

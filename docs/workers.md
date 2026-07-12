@@ -21,7 +21,7 @@ Celery("job_scout")
 
 | Queue | Tasks | Why separate |
 |---|---|---|
-| `default` | `scrape_source`, `notify_matching_users`, Beat periodic tasks | Normal traffic |
+| `default` | `scrape_source`, `validate_job`, `notify_matching_users`, Beat periodic tasks | Normal traffic |
 | `cv_processing` | `process_cv`, `analyze_cv_for_job`, `tailor_cv` | Slow (PDF + Gemini calls); isolates AI latency from the alert critical path |
 
 Start a worker that consumes **all** of them — a worker without `-Q …,cv_processing` will leave every CV/AI task pending forever:
@@ -36,11 +36,15 @@ celery -A app.workers.celery_app worker -l info -Q default,scraping,notification
 
 | Task | Queue | Retries | What it does |
 |---|---|---|---|
-| `scrape_source(source_id)` | default | 3 | Runs the source's registry scraper via [`scrape_service`](../app/services/scrape_service.py): fetch → dedup by `(source_id, external_id)` → insert/update jobs → source health + `ScrapeLog`. Fans out `notify_matching_users` for each **new** job |
-| `notify_matching_users(job_id)` | default | 3 | Speed-critical path: loads notifiable users, matches `user.preferences` (role keywords, company watchlist, location/remote), writes idempotent `UserJobAlert` rows, sends push ⚠️ `_send_push` is a stub — prints only |
-| `process_cv(user_id, cv_id)` | cv_processing | 2 | Downloads PDF from S3 → `pdfplumber` text → `_chunk_text` (2000 chars, 200 overlap, paragraph-aware) → `_detect_section` labels → Gemini embeddings (skipped without API key) → `CVChunk` rows → `_extract_skills_from_text` against `SKILLS_TAXONOMY` → upsert `user_skills` → status `ready`/`failed` |
+| `scrape_source(source_id)` | default | 3 | Runs the source's registry scraper via [`scrape_service`](../app/services/scrape_service.py): fetch → dedup by `(source_id, external_id)` → structural sanity + cross-source dedup → insert/update jobs → source health + `ScrapeLog`. Fans out **`validate_job`** for each new alertable job (or `notify_matching_users` directly when `validation_enabled=False`) |
+| `validate_job(job_id)` | default | 2 | Validates a new job's apply URL ([`validation_service`](../app/services/validation_service.py)): liveness + domain cross-check → persist `validation_status`. On `valid`/`unverified` fans out `notify_matching_users`; `dead`/`suspect` suppress the alert. Fail-open on flaky checks |
+| `notify_matching_users(job_id)` | default | 3 | Speed-critical path: loads notifiable users, matches `user.preferences` (role keywords, company watchlist, location/remote), writes idempotent `UserJobAlert` rows, then sends ONE batched FCM push via [`app/core/push.py`](../app/core/push.py) — `is_delivered` set on success, dead tokens cleared; logged no-op without `FCM_CREDENTIALS_PATH` |
+| `process_cv(user_id, cv_id)` | cv_processing | 2 | Downloads PDF from S3 → `pdfplumber` text → `_chunk_text` (2000 chars, 200 overlap, paragraph-aware) → `_detect_section` labels → Gemini embeddings (skipped without API key) → `CVChunk` rows → `extract_skills` against the shared taxonomy ([`app/core/skills.py`](../app/core/skills.py)) → upsert `user_skills` → status `ready`/`failed` |
+| `backfill_job_skills(batch_size=500)` | default | — | One-off: populate `job_skills` for existing active jobs that have none (extraction runs at ingest going forward). Idempotent; run once to seed the recommendation feed |
 | `analyze_cv_for_job(user_id, cv_id, job_id)` | cv_processing | 1 | ATS gap analysis via [`app/core/ai.py`](../app/core/ai.py); result cached in `cv_analyses` (24 h TTL) |
 | `tailor_cv(user_id, cv_id, job_id)` | cv_processing | 1 | Rewrites CV summary/skills for the job (reuses cached `missing_keywords` when available); never cached — always fresh |
+| `curate_cv(user_id, cv_id, job_id, draft_id)` | cv_processing | 1 | Full-CV curation: `parse_cv_structure` (cached on `user_cvs.parsed_structure`) → `tailor_cv_full` → draft to `review`. Documents are NOT generated here — user approves first |
+| `generate_cv_document(draft_id)` | cv_processing | 2 | Renders an **approved** draft to DOCX+PDF ([`docgen.py`](../app/core/docgen.py)) → S3 `…/generated/{draft_id}/` → status `rendered` |
 
 Also in `tasks.py`: `run_async()`, `_chunk_text`, `_detect_section`, `_extract_skills_from_text`, and the `SKILLS_TAXONOMY` dict (~10 categories of keyword→skill mappings used for non-AI skill extraction).
 
@@ -50,6 +54,7 @@ Also in `tasks.py`: `run_async()`, `_chunk_text`, `_detect_section`, `_extract_s
 |---|---|---|
 | `check-scraper-health` | `check_scraper_health` | every 5 min (`crontab(minute="*/5")`) — flags failing sources ⚠️ alerting is print-only |
 | `scrape-all-sources` | `scrape_all_active_sources` | every 15 min — loads due sources (`scrape_interval_minutes` elapsed) and fans out one `scrape_source` each |
+| `revalidate-active-jobs` | `revalidate_active_jobs` | daily 02:00 UTC — re-checks apply-URL liveness for the oldest-validated active jobs; two dead readings in a row deactivate the listing |
 | `cleanup-old-logs` | `cleanup_old_scrape_logs` | daily 03:00 UTC — deletes `scrape_logs` older than 30 days |
 | `cleanup-expired-cv-analyses` | `cleanup_expired_cv_analyses` | daily 04:00 UTC — deletes `cv_analyses` past `expires_at` |
 

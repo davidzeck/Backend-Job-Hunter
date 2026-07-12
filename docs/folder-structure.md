@@ -26,6 +26,9 @@ Job-backend/
 │   │   ├── security.py            # JWT create/decode, bcrypt hash/verify
 │   │   ├── storage.py             # S3/MinIO via aioboto3: presign upload/download, key sharding, delete
 │   │   ├── ai.py                  # Gemini: embeddings, JD keywords, ATS analysis, tailoring
+│   │   ├── push.py                # FCM: lazy init, batched send_each, outcome classification
+│   │   ├── skills.py              # SKILLS_TAXONOMY + extract_skills (shared: user_skills & job_skills)
+│   │   ├── docgen.py              # CVStructure JSON → DOCX (python-docx) / PDF (fpdf2), ATS-safe template
 │   │   ├── rate_limit.py          # slowapi limiter (Redis) + RATE_* constants + daily AI cap
 │   │   ├── logging.py             # structlog setup, secret redaction, RequestIDMiddleware
 │   │   └── exceptions.py          # APIException hierarchy
@@ -58,10 +61,12 @@ Job-backend/
 │   │   ├── user_service.py        # profile, preferences, skills
 │   │   ├── job_service.py         # job queries, skill-gap computation
 │   │   ├── company_service.py
-│   │   ├── scrape_service.py      # ingestion pipeline: scrape → dedup → persist → health → log
-│   │   ├── notification_service.py# user↔job matching + alert creation (⚠️ push send is a stub)
+│   │   ├── scrape_service.py      # ingestion pipeline: scrape → structural/dedup checks → persist → health → log
+│   │   ├── validation_service.py  # job validation: apply-URL liveness + domain cross-check + staleness sweep
+│   │   ├── notification_service.py# user↔job matching + alert creation + batched FCM send
 │   │   ├── alert_service.py       # alert list/read/saved/applied
-│   │   └── cv_service.py          # CV lifecycle, analysis caching, tailoring orchestration
+│   │   ├── cv_service.py          # CV lifecycle, analysis caching, tailoring orchestration
+│   │   └── cv_draft_service.py    # curation drafts: curate → review/edit → approve → download
 │   │
 │   ├── scrapers/
 │   │   ├── base.py                # BaseScraper (rate-limit, robots.txt, timing), StaticScraper, APIScraper

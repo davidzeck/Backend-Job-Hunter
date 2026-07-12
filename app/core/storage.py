@@ -152,6 +152,24 @@ async def download_bytes(s3_key: str) -> bytes:
             return await stream.read()
 
 
+# ── Upload bytes (for Celery workers) ────────────────────────────────────────
+
+async def upload_bytes(s3_key: str, data: bytes, content_type: str) -> None:
+    """
+    Upload in-memory bytes directly to S3.
+
+    Used by the worker to store rendered CV documents (DOCX/PDF). User uploads
+    still go through presigned POST — this is server-generated content only.
+    """
+    async with _s3_client() as s3:
+        await s3.put_object(
+            Bucket=settings.s3_bucket_name,
+            Key=s3_key,
+            Body=data,
+            ContentType=content_type,
+        )
+
+
 # ── Delete ───────────────────────────────────────────────────────────────────
 
 async def delete_object(s3_key: str) -> None:

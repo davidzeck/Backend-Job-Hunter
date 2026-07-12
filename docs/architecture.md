@@ -64,7 +64,8 @@ Custom `APIException` hierarchy (`UnauthorizedException`, `InvalidTokenException
 | S3 / MinIO | [`app/core/storage.py`](../app/core/storage.py) | aioboto3; endpoint URL switches MinIO↔AWS; presigned POST/GET |
 | Google Gemini | [`app/core/ai.py`](../app/core/ai.py) | `google-genai` SDK; all inputs truncated; JSON responses defensively parsed; errors redacted |
 | Redis | broker/results, slowapi storage, AI daily-cap counters | [`app/core/rate_limit.py`](../app/core/rate_limit.py) |
-| FCM / SMTP | ⚠️ configured but **not implemented** | see [known-issues](../../docs/known-issues.md) |
+| FCM push | [`app/core/push.py`](../app/core/push.py) | firebase-admin; lazy init from `FCM_CREDENTIALS_PATH`; batched `send_each` via `asyncio.to_thread`; logged no-op without credentials (⚠️ Firebase project ops pending — [known issue #2b](../../docs/known-issues.md)) |
+| SMTP | [`email_service.py`](../app/services/email_service.py) (auth emails only) | ⚠️ job-alert/digest emails not implemented — [known-issues](../../docs/known-issues.md) |
 
 ## Design decisions worth knowing
 

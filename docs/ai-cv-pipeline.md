@@ -44,6 +44,19 @@ Worker steps (via [`app/core/ai.py`](../app/core/ai.py), model `gemini-2.5-flash
 
 Always async, never cached. Reuses cached `missing_keywords` when a fresh analysis exists (saves one Gemini round-trip). `tailor_cv_section` rewrites the CV summary/skills sections to target the JD with **hard prompt rules against fabricating** experience or skills. Result delivered through task polling; the client renders it copy-paste-ready (backend does not modify the stored CV file).
 
+## 5. Curation & document export (2026-07-11) — `curate_cv` / `generate_cv_document`
+
+Full-CV rewrite with a **human review gate** ([cv_draft_service.py](../app/services/cv_draft_service.py), `cv_drafts` table):
+
+1. `POST /users/me/cv/{cv_id}/curate {job_id}` (AI rate limits apply) → supersedes any live draft for that (cv, job), enqueues `curate_cv`.
+2. **Stage 1 — parse**: `parse_cv_structure(full_text)` → structured CV JSON (`CVStructure` schema: contact/summary/skills/experience/education/certifications), **cached on `user_cvs.parsed_structure`** — one parse per CV, reused across every job.
+3. **Stage 2 — tailor**: `tailor_cv_full(structure, jd, missing_keywords)` (reuses fresh cached `cv_analyses.missing_keywords`, same as tailor) → full tailored structure + `keywords_injected`; same hard no-fabrication rules, plus "never change employers, titles, dates, degrees".
+4. Draft lands in `review` with `content = {original, tailored, keywords_injected}` — the client diffs the two structures; `PATCH` saves user edits to `tailored`.
+5. `POST …/approve` (`FOR UPDATE` guard) → `generate_cv_document` renders **DOCX (python-docx) + PDF (fpdf2)** via [docgen.py](../app/core/docgen.py) — one deliberately plain ATS template (single column, standard headings, no tables/images) — to S3 `cvs/{prefix4}/{user}/{cv}/generated/{draft}/` (inside the user prefix, so account-deletion purge covers it).
+6. `GET …/download?format=docx|pdf` → presigned GET; 409 until `rendered`.
+
+Malformed LLM output never reaches review: both stages validate through `CVStructure` (defaulted fields), and an effectively-empty tailored CV fails the draft with a sanitized error.
+
 ## Gemini integration details — [`app/core/ai.py`](../app/core/ai.py)
 
 | Function | Model | Purpose |
@@ -52,6 +65,8 @@ Always async, never cached. Reuses cached `missing_keywords` when a fresh analys
 | `extract_keywords_from_jd` | `gemini-2.5-flash` | JD → JSON keywords |
 | `analyze_cv_against_jd` | `gemini-2.5-flash` | Gap analysis, clamped score |
 | `tailor_cv_section` | `gemini-2.5-flash` | Rewrite summary/skills, no-fabrication rules |
+| `parse_cv_structure` | `gemini-2.5-flash` | CV text → structured JSON (temp 0, extract-only rules) |
+| `tailor_cv_full` | `gemini-2.5-flash` | Full-structure tailoring for document export |
 
 Defensive layers baked in:
 - **Input truncation**: CV text capped ~30k chars, JD ~15k before hitting the API (prompt-injection/cost bound).

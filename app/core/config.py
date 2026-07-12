@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     scrape_timeout_seconds: int = 30
     scrape_rate_limit_per_minute: int = 10
 
+    # Job validation (roadmap Phase A #3). Gates alert fan-out on new jobs and
+    # sweeps stale listings nightly. Fails open: a flaky check never suppresses.
+    validation_enabled: bool = True
+    validation_timeout_seconds: int = 15   # per apply-URL liveness check
+    revalidate_after_days: int = 7         # re-check active jobs older than this
+    revalidate_batch_size: int = 200       # oldest-checked-first per nightly run
+
     # File Storage (legacy local dir — kept for backward compat during transition)
     upload_dir: str = "./uploads"
     max_cv_size_mb: int = 5
@@ -94,6 +101,8 @@ class Settings(BaseSettings):
     gemini_chat_model: str = "gemini-2.5-flash"
     gemini_max_tokens_analysis: int = 1500
     gemini_max_tokens_tailor: int = 2000
+    gemini_max_tokens_parse: int = 2500    # CV full_text → CVStructure JSON
+    gemini_max_tokens_curate: int = 3000   # full-CV tailoring for document export
 
     @property
     def max_cv_size_bytes(self) -> int:
@@ -120,6 +129,13 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SECURITY: 'gemini_api_key' must be set in production/staging. "
                     "AI features will not function without it."
+                )
+            # Push credentials are required in production — job alerts are the
+            # core product; without FCM every "sent" notification is a no-op.
+            if not self.fcm_credentials_path:
+                raise ValueError(
+                    "'fcm_credentials_path' must be set in production/staging. "
+                    "Push notifications will not be delivered without it."
                 )
         return self
 

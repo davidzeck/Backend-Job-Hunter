@@ -55,7 +55,7 @@ Everything under Docker instead: `docker compose up -d` from this folder (or the
 - Heavy work (scraping, CV processing, AI) is Celery — [workers.md](workers.md).
 - Config is env-driven Pydantic settings ([`app/core/config.py`](../app/core/config.py)); production refuses dev defaults.
 - Auth: rotating refresh-token sessions + Redis revocation — read [security.md](security.md) before touching anything auth-adjacent. Tests: `pytest tests -q` (43 auth tests; needs Postgres + Redis).
-- ⚠️ Known stubs (push delivery, health alerting; tests cover auth only): [`../../docs/known-issues.md`](../../docs/known-issues.md). Launch checklist: [`../LAUNCH_REMAINING.md`](../LAUNCH_REMAINING.md).
+- ⚠️ Known gaps (push needs Firebase project ops, health alerting is a stub, tests cover auth + push only): [`../../docs/known-issues.md`](../../docs/known-issues.md). Launch checklist: [`../LAUNCH_REMAINING.md`](../LAUNCH_REMAINING.md).
 
 ## Conventions (enforce these in PRs)
 

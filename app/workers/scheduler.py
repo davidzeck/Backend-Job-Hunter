@@ -32,6 +32,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.scheduler.scrape_all_active_sources",
         "schedule": crontab(minute="*/15"),
     },
+    "revalidate-active-jobs": {
+        "task": "app.workers.scheduler.revalidate_active_jobs",
+        "schedule": crontab(hour=2, minute=0),  # before the 03:00 log cleanup
+    },
     "cleanup-old-logs": {
         "task": "app.workers.scheduler.cleanup_old_scrape_logs",
         "schedule": crontab(hour=3, minute=0),
@@ -97,6 +101,24 @@ async def _scrape_all_active_sources():
             scrape_source.delay(source_id)
 
         return {"triggered": len(due_source_ids)}
+
+
+@celery_app.task
+def revalidate_active_jobs():
+    """Nightly staleness sweep: re-check apply-URL liveness for the oldest-validated
+    active jobs; deactivate listings that read dead twice in a row."""
+    return run_async(_revalidate_active_jobs())
+
+
+async def _revalidate_active_jobs():
+    from app.core.config import settings
+    from app.services.validation_service import ValidationService
+
+    if not settings.validation_enabled:
+        return {"skipped": "validation_disabled"}
+
+    async with async_session_maker() as db:
+        return await ValidationService().revalidate_stale(db)
 
 
 @celery_app.task

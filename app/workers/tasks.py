@@ -57,6 +57,7 @@ def scrape_source(self, source_id: str):
 
 async def _scrape_source(source_id: str):
     """Async implementation - delegates to ScrapeService."""
+    from app.core.config import settings
     from app.services.scrape_service import ScrapeService
 
     scrape_service = ScrapeService()
@@ -64,11 +65,80 @@ async def _scrape_source(source_id: str):
     async with async_session_maker() as db:
         result = await scrape_service.scrape_source(db, source_id)
 
-        if result.get("new_job_ids"):
-            for job_id in result["new_job_ids"]:
+        # Validation gate: new jobs are validated before alerting so dead/wrong
+        # links never notify users. validate_job fans out to notify on pass.
+        # With validation disabled, fall back to notifying directly.
+        for job_id in result.get("new_job_ids", []):
+            if settings.validation_enabled:
+                validate_job.delay(job_id)
+            else:
                 notify_matching_users.delay(job_id)
 
         return result
+
+
+@celery_app.task(bind=True)
+def backfill_job_skills(self, batch_size: int = 500):
+    """One-off: populate job_skills for existing active jobs that have none.
+
+    Job-skill extraction runs at ingest going forward; this seeds the
+    recommendation feed for jobs scraped before that existed. Safe to re-run."""
+    return run_async(_backfill_job_skills(batch_size))
+
+
+async def _backfill_job_skills(batch_size: int):
+    from sqlalchemy import select
+
+    from app.models.job import Job
+    from app.models.job_skill import JobSkill
+    from app.services.scrape_service import ScrapeService
+
+    service = ScrapeService()
+    processed = 0
+    skills_added = 0
+
+    async with async_session_maker() as db:
+        # Active jobs with no job_skills rows yet.
+        result = await db.execute(
+            select(Job)
+            .where(
+                Job.is_active == True,  # noqa: E712
+                ~Job.id.in_(select(JobSkill.job_id)),
+            )
+            .limit(batch_size)
+        )
+        jobs = list(result.scalars().all())
+        for job in jobs:
+            skills_added += await service._extract_job_skills(db, job)
+            processed += 1
+        await db.commit()
+
+    return {"processed": processed, "skills_added": skills_added}
+
+
+@celery_app.task(bind=True, max_retries=2)
+def validate_job(self, job_id: str):
+    """
+    Validate a newly-scraped job's apply URL, then alert on pass.
+
+    Sits between ingest and the alert critical path. Definitive dead/suspect
+    results suppress the alert; valid/unverified (incl. network flakiness) let
+    it through — a validation hiccup must never silently drop a real job.
+    """
+    return run_async(_validate_job(job_id))
+
+
+async def _validate_job(job_id: str):
+    from uuid import UUID
+
+    from app.services.validation_service import ValidationService
+
+    async with async_session_maker() as db:
+        should_alert = await ValidationService().validate_job(db, UUID(job_id))
+
+    if should_alert:
+        notify_matching_users.delay(job_id)
+    return {"job_id": job_id, "alerted": should_alert}
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -212,8 +282,10 @@ async def _process_cv(user_id: str, cv_id: str):
                 ))
 
             # ── 8. Keyword skill matching ───────────────────────────────────
+            from app.core.skills import extract_skills_from_lower
+
             text_lower = text.lower()
-            extracted = _extract_skills_from_text(text_lower)
+            extracted = extract_skills_from_lower(text_lower)
 
             # ── 9. Upsert skills for this CV ────────────────────────────────
             await db.execute(
@@ -475,6 +547,194 @@ async def _tailor_cv(user_id: str, cv_id: str, job_id: str) -> dict:
         }
 
 
+# ── CV Curation & Document Export ─────────────────────────────────────────────
+
+
+@celery_app.task(bind=True, max_retries=1, queue="cv_processing")
+def curate_cv(self, user_id: str, cv_id: str, job_id: str, draft_id: str):
+    """
+    Stage-1+2 curation: parse the CV into structure (cached per CV), tailor the
+    FULL structure against the JD, land the result as a draft in `review`.
+    Documents are NOT generated here — the user approves first.
+    """
+    return run_async(_curate_cv(user_id, cv_id, job_id, draft_id))
+
+
+async def _curate_cv(user_id: str, cv_id: str, job_id: str, draft_id: str):
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+
+    from app.core import ai
+    from app.models.cv_analysis import CVAnalysis
+    from app.models.cv_draft import (
+        CVDraft,
+        DRAFT_STATUS_FAILED,
+        DRAFT_STATUS_GENERATING,
+        DRAFT_STATUS_REVIEW,
+    )
+    from app.models.job import Job
+    from app.models.user_cv import UserCV
+    from app.schemas.cv import CVStructure
+
+    async with async_session_maker() as db:
+        draft = (await db.execute(
+            select(CVDraft).where(CVDraft.id == _uuid.UUID(draft_id))
+        )).scalar_one_or_none()
+        if not draft or draft.status != DRAFT_STATUS_GENERATING:
+            return {"error": "Draft not found or not in generating state"}
+
+        async def fail(public_message: str):
+            draft.status = DRAFT_STATUS_FAILED
+            draft.error = public_message  # sanitized — full detail is in logs
+            await db.commit()
+            return {"error": public_message, "draft_id": draft_id}
+
+        cv = (await db.execute(
+            select(UserCV).where(
+                UserCV.id == _uuid.UUID(cv_id),
+                UserCV.user_id == _uuid.UUID(user_id),
+                UserCV.is_active == True,
+            )
+        )).scalar_one_or_none()
+        if not cv or not cv.full_text:
+            return await fail("CV not found or not processed")
+
+        job = (await db.execute(
+            select(Job).where(Job.id == _uuid.UUID(job_id), Job.is_active == True)
+        )).scalar_one_or_none()
+        if not job or not job.description:
+            return await fail("Job not found or has no description")
+
+        try:
+            # Stage 1 — structure parse, cached once per CV.
+            if cv.parsed_structure:
+                structure = cv.parsed_structure
+            else:
+                raw_structure = await ai.parse_cv_structure(cv.full_text)
+                structure = CVStructure.model_validate(raw_structure).model_dump()
+                cv.parsed_structure = structure
+                await db.flush()
+
+            # Missing keywords: reuse a fresh cached analysis (same as _tailor_cv).
+            now = datetime.now(timezone.utc)
+            cached_analysis = (await db.execute(
+                select(CVAnalysis).where(
+                    CVAnalysis.cv_id == cv.id,
+                    CVAnalysis.job_id == job.id,
+                    CVAnalysis.expires_at > now,
+                )
+            )).scalar_one_or_none()
+            if cached_analysis:
+                missing_keywords = cached_analysis.missing_keywords
+            else:
+                jd_keywords = await ai.extract_keywords_from_jd(job.description)
+                analysis_result = await ai.analyze_cv_against_jd(
+                    cv.full_text, job.description, jd_keywords
+                )
+                missing_keywords = analysis_result.get("missing_keywords", [])
+
+            # Stage 2 — full-structure tailoring.
+            result = await ai.tailor_cv_full(
+                structure, job.description, missing_keywords
+            )
+            tailored = CVStructure.model_validate(result.get("tailored") or {})
+            if not tailored.summary and not tailored.experience:
+                # Model returned an effectively-empty CV — don't put that in review.
+                return await fail("Curation produced no usable content. Try again.")
+
+        except ai.AIQuotaExceededError:
+            return await fail("AI quota exhausted. Try again later.")
+        except Exception as exc:
+            logger.error(
+                "cv_curate_failed", draft_id=draft_id, cv_id=cv_id,
+                job_id=job_id, error=str(exc),
+            )
+            return await fail("Curation failed. Please try again.")
+
+        draft.content = {
+            "original": structure,
+            "tailored": tailored.model_dump(),
+            "keywords_injected": [
+                str(k) for k in result.get("keywords_injected", [])
+            ],
+        }
+        draft.status = DRAFT_STATUS_REVIEW
+        await db.commit()
+
+        logger.info(
+            "cv_curate_completed", draft_id=draft_id, cv_id=cv_id, job_id=job_id,
+            keywords_injected=len(draft.content["keywords_injected"]),
+        )
+        return {"draft_id": draft_id, "status": DRAFT_STATUS_REVIEW}
+
+
+@celery_app.task(bind=True, max_retries=2, queue="cv_processing")
+def generate_cv_document(self, draft_id: str):
+    """Render an APPROVED draft's tailored structure to DOCX + PDF in S3."""
+    return run_async(_generate_cv_document(draft_id))
+
+
+async def _generate_cv_document(draft_id: str):
+    import uuid as _uuid
+    from sqlalchemy import select
+
+    from app.core import storage
+    from app.core.docgen import render_docx, render_pdf
+    from app.models.cv_draft import (
+        CVDraft,
+        DRAFT_STATUS_APPROVED,
+        DRAFT_STATUS_FAILED,
+        DRAFT_STATUS_RENDERED,
+    )
+
+    async with async_session_maker() as db:
+        draft = (await db.execute(
+            select(CVDraft).where(CVDraft.id == _uuid.UUID(draft_id))
+        )).scalar_one_or_none()
+        if not draft or draft.status != DRAFT_STATUS_APPROVED:
+            return {"error": "Draft not found or not approved"}
+
+        tailored = (draft.content or {}).get("tailored")
+        if not tailored:
+            draft.status = DRAFT_STATUS_FAILED
+            draft.error = "Draft has no content to render"
+            await db.commit()
+            return {"error": draft.error}
+
+        base_key = storage.build_s3_key(
+            str(draft.user_id), str(draft.cv_id), "x"
+        ).rsplit("/", 1)[0] + f"/generated/{draft_id}"
+
+        try:
+            docx_bytes = render_docx(tailored)
+            pdf_bytes = render_pdf(tailored)
+            docx_key = f"{base_key}/cv.docx"
+            pdf_key = f"{base_key}/cv.pdf"
+            await storage.upload_bytes(
+                docx_key, docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            await storage.upload_bytes(pdf_key, pdf_bytes, "application/pdf")
+        except Exception as exc:
+            logger.error("cv_render_failed", draft_id=draft_id, error=str(exc))
+            draft.status = DRAFT_STATUS_FAILED
+            draft.error = "Document generation failed. Please try again."
+            await db.commit()
+            return {"error": draft.error}
+
+        draft.docx_s3_key = docx_key
+        draft.pdf_s3_key = pdf_key
+        draft.status = DRAFT_STATUS_RENDERED
+        await db.commit()
+
+        logger.info(
+            "cv_render_completed", draft_id=draft_id,
+            docx_bytes=len(docx_bytes), pdf_bytes=len(pdf_bytes),
+        )
+        return {"draft_id": draft_id, "status": DRAFT_STATUS_RENDERED}
+
+
 # ── Text Chunking Helpers ─────────────────────────────────────────────────────
 
 
@@ -531,95 +791,5 @@ def _detect_section(text: str) -> str:
     return "other"
 
 
-# ── Skills Extraction ─────────────────────────────────────────────────────────
-
-
-def _extract_skills_from_text(text_lower: str) -> list[tuple[str, str]]:
-    """
-    Simple keyword-in-text skill extraction against SKILLS_TAXONOMY.
-
-    Returns a list of (skill_name, category) tuples for every taxonomy entry
-    found in the CV text.
-    """
-    found = []
-    for category, skills in SKILLS_TAXONOMY.items():
-        for skill in skills:
-            if skill.lower() in text_lower:
-                found.append((skill, category))
-    return found
-
-
-# ── Skills taxonomy ───────────────────────────────────────────────────────────
-# category → list of canonical skill names (matching is case-insensitive substring search)
-SKILLS_TAXONOMY: dict[str, list[str]] = {
-    "languages": [
-        "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "Swift",
-        "Go", "Rust", "C++", "C#", "C", "Ruby", "PHP", "Scala", "R",
-        "Dart", "Elixir", "Haskell", "Clojure", "Lua", "Perl", "MATLAB",
-        "Bash", "PowerShell", "SQL", "HTML", "CSS", "Sass", "SCSS",
-    ],
-    "frontend": [
-        "React", "Vue", "Angular", "Next.js", "Nuxt", "Svelte", "SvelteKit",
-        "Redux", "MobX", "Zustand", "Tailwind CSS", "Bootstrap", "Material UI",
-        "Chakra UI", "Ant Design", "Storybook", "Webpack", "Vite", "Rollup",
-        "Babel", "ESLint", "Prettier", "Jest", "Cypress", "Playwright",
-        "Three.js", "D3.js", "Chart.js", "WebGL", "WebRTC", "WebSockets",
-        "PWA", "Service Workers", "Web Components",
-    ],
-    "backend": [
-        "FastAPI", "Django", "Flask", "Express", "NestJS", "Spring Boot",
-        "Laravel", "Rails", "Gin", "Echo", "Fiber", "ASP.NET Core",
-        "GraphQL", "REST", "gRPC", "OAuth2", "JWT",
-        "OpenAPI", "Swagger", "Celery", "RabbitMQ", "Kafka", "SQS",
-        "Bull", "BullMQ", "Dramatiq", "Pydantic", "SQLAlchemy", "Prisma",
-        "TypeORM", "Sequelize", "Mongoose", "Hibernate", "GORM",
-    ],
-    "databases": [
-        "PostgreSQL", "MySQL", "SQLite", "MariaDB", "Oracle",
-        "MongoDB", "Redis", "Cassandra", "DynamoDB", "CosmosDB",
-        "Elasticsearch", "OpenSearch", "InfluxDB", "TimescaleDB",
-        "Neo4j", "Dgraph", "Fauna", "Supabase", "PlanetScale",
-        "pgvector", "Pinecone", "Qdrant", "Weaviate", "Chroma", "Milvus",
-        "Firestore",
-    ],
-    "cloud": [
-        "AWS", "GCP", "Azure", "Cloudflare", "DigitalOcean", "Heroku",
-        "Vercel", "Netlify", "Railway", "Render",
-        "S3", "EC2", "Lambda", "ECS", "EKS", "Fargate", "CloudFront",
-        "RDS", "Aurora", "SageMaker", "Bedrock",
-        "Cloud Run", "Cloud Functions", "BigQuery",
-        "App Service", "Azure Functions",
-    ],
-    "devops": [
-        "Docker", "Kubernetes", "Helm", "Terraform", "Ansible", "Pulumi",
-        "GitHub Actions", "GitLab CI", "CircleCI", "Jenkins", "ArgoCD",
-        "Prometheus", "Grafana", "Datadog", "New Relic", "Sentry",
-        "ELK Stack", "Kibana", "Logstash", "Fluentd", "OpenTelemetry",
-        "Nginx", "Traefik", "Istio", "Envoy", "Linkerd",
-        "Linux",
-    ],
-    "mobile": [
-        "Flutter", "React Native", "SwiftUI",
-        "Jetpack Compose", "Xamarin", "Ionic", "Capacitor",
-        "Android SDK", "iOS SDK", "Expo", "Firebase",
-    ],
-    "ai_ml": [
-        "Machine Learning", "Deep Learning", "NLP", "Computer Vision",
-        "PyTorch", "TensorFlow", "Keras", "Scikit-learn", "XGBoost",
-        "LangChain", "LlamaIndex", "OpenAI", "Anthropic", "Hugging Face",
-        "Transformers", "BERT", "GPT", "RAG", "Vector Search", "Embeddings",
-        "pandas", "NumPy", "Matplotlib", "Seaborn", "Plotly",
-        "Jupyter", "MLflow",
-    ],
-    "testing": [
-        "Unit Testing", "Integration Testing", "End-to-End Testing",
-        "TDD", "BDD", "Pytest", "Jest", "Mocha", "Chai",
-        "Playwright", "Cypress", "Selenium", "Postman",
-        "k6", "Locust", "JMeter",
-    ],
-    "soft_skills": [
-        "Agile", "Scrum", "Kanban", "JIRA", "Confluence",
-        "Technical Writing", "Code Review", "Pair Programming",
-        "Mentoring", "System Design",
-    ],
-}
+# Skill taxonomy + extraction moved to app/core/skills.py (shared with job
+# ingestion so user_skills and job_skills use the same vocabulary).

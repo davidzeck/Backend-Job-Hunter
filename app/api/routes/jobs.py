@@ -16,6 +16,7 @@ from app.services.job_service import JobService
 from app.schemas.job import (
     JobListItem,
     JobDetail,
+    RecommendedJob,
     SkillGapResponse,
     SaveJobRequest,
     AppliedJobRequest,
@@ -39,12 +40,19 @@ async def list_jobs(
     role: Optional[str] = Query(None, description="Role keyword search"),
     location_type: Optional[str] = Query(None, description="remote, onsite, hybrid"),
     days_ago: int = Query(7, le=30, description="Jobs from last N days"),
+    validation_status: Optional[str] = Query(
+        None, description="Admin only: filter by validation status (e.g. 'suspect')"
+    ),
     page: int = Query(1, ge=1),
     limit: int = Query(20, le=100),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List jobs with optional filters and pagination."""
+    """List jobs with optional filters and pagination.
+
+    `validation_status` is honored only for admins (review queue); other users
+    always get the default feed with `dead` jobs excluded.
+    """
     return await job_service.list_jobs(
         db,
         current_user_id=current_user.id,
@@ -53,13 +61,29 @@ async def list_jobs(
         role=role,
         location_type=location_type,
         days_ago=days_ago,
+        validation_status=validation_status if current_user.is_admin else None,
         page=page,
         limit=limit,
     )
 
 
-# NOTE: /saved must be declared before /{job_id} — otherwise "saved" is parsed
-# as a UUID path param and 422s.
+# NOTE: static sub-paths (/saved, /recommended) must be declared before
+# /{job_id} — otherwise they're parsed as a UUID path param and 422.
+@router.get("/recommended", response_model=PaginatedResponse[RecommendedJob])
+async def list_recommended_jobs(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Jobs ranked by skill overlap with the current user's CV skills.
+
+    Empty for users with no extracted skills (upload a CV first)."""
+    return await job_service.list_recommended(
+        db, current_user.id, page=page, limit=limit
+    )
+
+
 @router.get("/saved", response_model=PaginatedResponse[JobListItem])
 async def list_saved_jobs(
     page: int = Query(1, ge=1),

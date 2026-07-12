@@ -386,3 +386,137 @@ async def tailor_cv_section(
         if _is_quota_error(exc):
             raise AIQuotaExceededError("AI quota exhausted") from exc
         raise RuntimeError("CV tailoring failed") from exc
+
+
+# ── Full-CV curation (document export) ────────────────────────────────────────
+
+# The structured-CV JSON shape shared by parse and tailor prompts. Kept in sync
+# with app/schemas/cv.py CVStructure (which validates every LLM response).
+_CV_STRUCTURE_SPEC = (
+    "{\n"
+    '  "contact": {"name": str, "email": str, "phone": str, "location": str, "links": [str]},\n'
+    '  "summary": str,\n'
+    '  "skills": [{"category": str, "items": [str]}],\n'
+    '  "experience": [{"title": str, "company": str, "location": str, '
+    '"start": str, "end": str, "bullets": [str]}],\n'
+    '  "education": [{"degree": str, "institution": str, "year": str}],\n'
+    '  "certifications": [str]\n'
+    "}"
+)
+
+
+async def parse_cv_structure(cv_text: str) -> Dict[str, Any]:
+    """
+    Parse raw CV text into the structured-CV JSON (stage 1 of curation).
+
+    Pure extraction — nothing is rewritten, added, or dropped. Cached on
+    user_cvs.parsed_structure by the caller (one parse per CV, reused across
+    every job it's curated against).
+    """
+    cv = _truncate(cv_text.strip(), _MAX_CV_CHARS)
+
+    system_prompt = (
+        "You are a precise CV parser. Convert the CV text into structured JSON.\n\n"
+        "RULES:\n"
+        "1. EXTRACT ONLY — never rewrite, summarize, add, or omit content.\n"
+        "2. Copy wording verbatim; keep bullet points as separate strings.\n"
+        "3. Dates stay as written (e.g. 'Jan 2022', 'Present') — do not reformat.\n"
+        "4. If a section is absent, use an empty string/array.\n\n"
+        "Return ONLY a JSON object with exactly this shape:\n"
+        f"{_CV_STRUCTURE_SPEC}\n"
+        "No markdown, no code fences, no explanation."
+    )
+
+    try:
+        client = _client()
+        response = client.models.generate_content(
+            model=settings.gemini_chat_model,
+            contents=f"## CV Text\n{cv}",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.0,
+                max_output_tokens=settings.gemini_max_tokens_parse,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        raw = response.text or ""
+        return _safe_parse_json(raw, {})
+
+    except Exception as exc:
+        logger.error("gemini_api_error", endpoint="parse_cv_structure", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
+        raise RuntimeError("CV parsing failed") from exc
+
+
+async def tailor_cv_full(
+    structure: Dict[str, Any],
+    job_description: str,
+    missing_keywords: List[str],
+) -> Dict[str, Any]:
+    """
+    Tailor a FULL structured CV against a JD (stage 2 of curation).
+    Same no-fabrication contract as tailor_cv_section, applied to every section.
+
+    Returns:
+        {"tailored": CVStructure-shaped dict, "keywords_injected": [str]}
+    """
+    jd = _truncate(job_description.strip(), _MAX_JD_CHARS)
+    structure_json = _truncate(json.dumps(structure), _MAX_CV_CHARS)
+    fallback: Dict[str, Any] = {"tailored": {}, "keywords_injected": []}
+
+    system_prompt = (
+        "You are a professional CV writer. Tailor the candidate's structured "
+        "CV to the job description.\n\n"
+        "CRITICAL RULES — violations are unacceptable:\n"
+        "1. NEVER fabricate experience, certifications, or job history.\n"
+        "2. NEVER add skills the candidate does not plausibly have "
+        "based on their CV.\n"
+        "3. NEVER change employers, job titles, dates, degrees, or "
+        "institutions — copy them unchanged.\n"
+        "4. You MAY rewrite the summary, reword experience bullets using "
+        "JD-aligned language, reorder skills/bullets by relevance, and "
+        "naturally incorporate missing keywords where truthful.\n"
+        "5. Preserve the candidate's authentic voice and tone.\n\n"
+        "Return ONLY a JSON object with these exact keys:\n"
+        '  "tailored": the full CV in exactly this shape:\n'
+        f"{_CV_STRUCTURE_SPEC}\n"
+        '  "keywords_injected": array of missing keywords you incorporated.\n'
+        "No markdown, no code fences, no explanation."
+    )
+
+    user_content = (
+        f"## Missing Keywords to Incorporate (if truthful)\n"
+        f"{json.dumps(missing_keywords)}\n\n"
+        f"## Job Description\n{jd}\n\n"
+        f"## Structured CV (JSON)\n{structure_json}"
+    )
+
+    try:
+        client = _client()
+        response = client.models.generate_content(
+            model=settings.gemini_chat_model,
+            contents=user_content,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.3,
+                max_output_tokens=settings.gemini_max_tokens_curate,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        raw = response.text or ""
+        result = _safe_parse_json(raw, fallback)
+
+        if not isinstance(result.get("tailored"), dict):
+            result["tailored"] = {}
+        if not isinstance(result.get("keywords_injected"), list):
+            result["keywords_injected"] = []
+        return result
+
+    except Exception as exc:
+        logger.error("gemini_api_error", endpoint="tailor_cv_full", error_type=type(exc).__name__, error=_sanitize_error(exc))
+        if _is_quota_error(exc):
+            raise AIQuotaExceededError("AI quota exhausted") from exc
+        raise RuntimeError("CV curation failed") from exc

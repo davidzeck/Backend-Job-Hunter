@@ -134,3 +134,94 @@ class CVTaskStatusResponse(BaseSchema):
     status: str             # pending | started | success | failure
     result: Optional[Any] = None
     error: Optional[str] = None
+
+
+# ── Tier 3 — Curated CV drafts & document export ─────────────────────────────
+
+class CVContact(BaseSchema):
+    """Contact block of a structured CV."""
+
+    name: str = ""
+    email: str = ""
+    phone: str = ""
+    location: str = ""
+    links: List[str] = []
+
+
+class CVSkillGroup(BaseSchema):
+    """One category of skills (e.g. 'Languages: Python, Go')."""
+
+    category: str = ""
+    items: List[str] = []
+
+
+class CVExperience(BaseSchema):
+    """One work-history entry."""
+
+    title: str = ""
+    company: str = ""
+    location: str = ""
+    start: str = ""     # freeform ("Jan 2022") — parsing dates from CVs is a losing game
+    end: str = ""       # freeform ("Present")
+    bullets: List[str] = []
+
+
+class CVEducation(BaseSchema):
+    """One education entry."""
+
+    degree: str = ""
+    institution: str = ""
+    year: str = ""
+
+
+class CVStructure(BaseSchema):
+    """
+    A CV as structured data — the contract between the AI parse/tailor stages,
+    the review UI, and the document renderers. Every field is defaulted so a
+    partial LLM response still validates; empty sections are simply omitted
+    from rendered documents.
+    """
+
+    contact: CVContact = CVContact()
+    summary: str = ""
+    skills: List[CVSkillGroup] = []
+    experience: List[CVExperience] = []
+    education: List[CVEducation] = []
+    certifications: List[str] = []
+
+
+class CurateRequest(BaseSchema):
+    """Start a full-CV curation draft against a job."""
+
+    job_id: UUID
+
+
+class CVDraftResponse(BaseSchema):
+    """A curation draft (content present once status reaches 'review')."""
+
+    id: UUID
+    cv_id: UUID
+    job_id: UUID
+    status: str                 # generating | review | approved | rendered | failed | superseded
+    content: Optional[Dict[str, Any]] = None   # {original, tailored, keywords_injected}
+    error: Optional[str] = None
+    docx_ready: bool = False
+    pdf_ready: bool = False
+    approved_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CVDraftUpdateRequest(BaseSchema):
+    """User edits to the tailored structure during review."""
+
+    tailored: CVStructure
+
+
+class CVDraftDownloadResponse(BaseSchema):
+    """Short-lived presigned GET for a rendered document."""
+
+    draft_id: UUID
+    format: str                 # docx | pdf
+    download_url: str
+    expires_in: int             # seconds

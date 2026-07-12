@@ -39,23 +39,45 @@ flowchart TD
     C --> D["scraper.execute() → ScrapeResult"]
     D --> E{for each ScrapedJob:<br/>exists by source_id + external_id?}
     E -- yes --> F[update if description changed]
-    E -- no --> G[insert Job → collect new_job_ids]
-    F & G --> H["source.mark_success() / mark_failure()<br/>(health_status, consecutive_failures)"]
-    H --> I[write ScrapeLog<br/>jobs_found / new / updated / duration / errors]
-    I --> J[fan out notify_matching_users per new job]
+    E -- no --> G[insert Job]
+    G --> G2{structural sanity?}
+    G2 -- fail --> GS[mark suspect · no alert]
+    G2 -- ok --> G3{cross-source duplicate?}
+    G3 -- yes --> GD[set duplicate_of_job_id · no alert]
+    G3 -- no --> GN[collect new_job_ids]
+    F & GS & GD & GN --> H["source.mark_success() / mark_failure()"]
+    H --> I[write ScrapeLog]
+    I --> J[fan out validate_job per new_job_id]
+    J --> K{apply-URL live + domain ok?}
+    K -- dead/suspect --> KS[persist status · NO alert]
+    K -- valid/unverified --> KN[notify_matching_users]
 ```
 
 Trigger paths:
 - **Scheduled**: Beat `scrape_all_active_sources` (every 15 min) → `get_due_sources()` (sources whose `scrape_interval_minutes` has elapsed) → one `scrape_source` task each.
 - **Manual**: `POST /api/v1/sources/{source_id}/scrape` (dashboard "Scrape now") → same task.
 
+## Validation — [`app/services/validation_service.py`](../app/services/validation_service.py)
+
+A validation stage sits **between ingest and alert fan-out** so dead or misattributed jobs never notify users (`validation_enabled` config kill-switch; when off, `_scrape_source` notifies directly as before). `jobs.validation_status` ∈ `unverified | valid | suspect | dead`:
+
+- **At ingest (synchronous, in `scrape_service`)**: cheap no-network checks. *Structural sanity* (`_structural_issues`: empty/overlong title, too-short description, unparseable apply URL, future `posted_at`) → mark `suspect`, no alert, counted into `ScrapeLog.extra_data` (catches scraper parser drift). *Cross-source dedup* (`find_cross_source_duplicate`: same company + `normalize_title` match from a different source within 30 days) → set `duplicate_of_job_id`, no alert.
+- **Post-ingest (`validate_job` task, `default` queue)**: apply-URL **liveness** (HEAD→GET fallback: 404/410 = `dead`, 5xx/timeout = `unverified`) + **domain cross-check** (final host vs `companies.careers_url` domain or the `KNOWN_ATS_DOMAINS` allowlist; mismatch = `suspect`). On `valid`/`unverified` → fan out `notify_matching_users`. **Fail-open**: a flaky/timeout check yields `unverified` and still alerts — validation never silently drops a real job.
+- **Nightly (`revalidate_active_jobs`, 02:00 UTC)**: re-checks liveness for the oldest-validated active jobs (`revalidate_after_days`, `revalidate_batch_size`); a listing that reads dead **twice in a row** is deactivated (`is_active=False`, `validation_status=dead`).
+
+`dead` jobs are excluded from `GET /jobs` by default; admins can review with `GET /jobs?validation_status=suspect`.
+
+## Skill extraction at ingest — [`app/core/skills.py`](../app/core/skills.py)
+
+For every new job, `scrape_service` runs `extract_skills(title + description)` against the shared `SKILLS_TAXONOMY` (same taxonomy the CV pipeline uses for `user_skills`) and upserts `job_skills` rows. This powers `GET /jobs/recommended`, skill-aware alerting, and the skill-gap endpoint — all of which had no data before, since nothing populated `job_skills`. Backfill existing jobs with the `backfill_job_skills` Celery task. (Known limitation: substring matching over-hits single-letter skills like "R"/"C"/"Go"; symmetric on both sides.)
+
 ## Matching & alerting — [`app/services/notification_service.py`](../app/services/notification_service.py)
 
 `notify_for_new_job(job_id)`:
 1. `UserRepository.get_notifiable_users()` — active users with push enabled.
-2. `_user_matches_job()` filters on `user.preferences`: role keywords vs job title, company watchlist (by slug), location match including remote.
+2. `_user_matches_job()` — matches when **preferences match OR CV-skill coverage ≥ 0.5**. Preference match: role keywords vs title, company watchlist (by slug), location incl. remote. Skill match (opt-in via `skill_alerts_enabled`, default on) uses job/user skill sets prefetched in two batched queries (no N+1).
 3. Idempotent `UserJobAlert` insert per match.
-4. `_send_push()` — ⚠️ **stub**: prints and returns `True`; real FCM via `firebase-admin` is pending ([known issue #2](../../docs/known-issues.md)).
+4. One batched FCM send via [`app/core/push.py`](../app/core/push.py) — marks alerts `is_delivered` on success, clears dead tokens (`UNREGISTERED`), logged no-op without `FCM_CREDENTIALS_PATH` (⚠️ Firebase project setup pending — [known issue #2b](../../docs/known-issues.md)).
 
 ## Source health
 

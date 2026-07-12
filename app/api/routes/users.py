@@ -34,6 +34,7 @@ from app.schemas.user import (
 )
 from app.schemas.auth import ChangePasswordRequest
 from app.schemas.base import MessageResponse
+from app.services.cv_draft_service import CVDraftService
 from app.schemas.cv import (
     CVPresignRequest,
     CVPresignResponse,
@@ -42,6 +43,10 @@ from app.schemas.cv import (
     CVDownloadUrlResponse,
     CVAnalyzeRequest,
     CVTaskStatusResponse,
+    CurateRequest,
+    CVDraftResponse,
+    CVDraftUpdateRequest,
+    CVDraftDownloadResponse,
 )
 
 
@@ -52,6 +57,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 user_service = UserService()
 cv_service = CVService()
+cv_draft_service = CVDraftService()
 
 
 @router.get("/me", response_model=UserProfileResponse)
@@ -334,3 +340,85 @@ async def get_task_status(
     When status=success, the result field contains the full response.
     """
     return cv_service.get_task_status(task_id)
+
+
+# ── CV Curation & Document Export ────────────────────────────────────────────
+
+
+@router.post("/me/cv/{cv_id}/curate", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(RATE_AI)
+async def curate_cv_endpoint(
+    request: Request,
+    cv_id: uuid.UUID,
+    req: CurateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Start a full-CV curation draft against a job (the heaviest AI call).
+
+    Supersedes any live draft for the same (cv, job). Poll the returned task_id;
+    the draft lands in `review` for the user to inspect/edit before approving.
+    Rate limited to 10/hour + 50/day per user (Gemini cost control).
+    """
+    if not await check_ai_daily_cap(str(current_user.id)):
+        raise HTTPException(status_code=429, detail=_AI_LIMIT_MESSAGE)
+    return await cv_draft_service.start_curate(db, current_user.id, cv_id, req.job_id)
+
+
+@router.get("/me/cv/drafts", response_model=list[CVDraftResponse])
+async def list_cv_drafts(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's curation drafts, newest first (superseded excluded)."""
+    return await cv_draft_service.list_drafts(db, current_user.id)
+
+
+@router.get("/me/cv/drafts/{draft_id}", response_model=CVDraftResponse)
+async def get_cv_draft(
+    draft_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """One draft, with content once status reaches `review`."""
+    return await cv_draft_service.get_draft(db, current_user.id, draft_id)
+
+
+@router.patch("/me/cv/drafts/{draft_id}", response_model=CVDraftResponse)
+async def update_cv_draft(
+    draft_id: uuid.UUID,
+    req: CVDraftUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save the user's edits to the tailored structure (review stage only)."""
+    return await cv_draft_service.update_draft(
+        db, current_user.id, draft_id, req.tailored
+    )
+
+
+@router.post("/me/cv/drafts/{draft_id}/approve", status_code=status.HTTP_202_ACCEPTED)
+async def approve_cv_draft(
+    draft_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Approve a reviewed draft — the human gate before any document exists.
+    Enqueues DOCX+PDF generation; poll the returned task_id, then download.
+    """
+    return await cv_draft_service.approve_draft(db, current_user.id, draft_id)
+
+
+@router.get("/me/cv/drafts/{draft_id}/download", response_model=CVDraftDownloadResponse)
+async def download_cv_draft(
+    draft_id: uuid.UUID,
+    format: str = "pdf",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Presigned URL for a rendered document (`format=docx|pdf`). 409 until rendered."""
+    return await cv_draft_service.get_download_url(
+        db, current_user.id, draft_id, format
+    )

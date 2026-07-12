@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional, List
 from sqlalchemy import String, Boolean, Text, Integer, DateTime, ForeignKey, Index
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
@@ -80,6 +80,10 @@ class UserCV(BaseModel):
 
     # Full extracted text cached here so analysis/tailoring doesn't re-download from S3
     full_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Cached AI parse of full_text into CVStructure JSON (stage 1 of curation) —
+    # parsed once per CV, reused across every job it's curated against.
+    parsed_structure: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="cvs")

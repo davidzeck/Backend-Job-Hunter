@@ -50,6 +50,10 @@ firebase-admin==6.4.0
 # Email
 aiosmtplib==3.0.1
 
+# CV document generation (pure Python — no system deps)
+python-docx>=1.1
+fpdf2>=2.7
+
 # Utilities
 python-dotenv==1.0.1
 

@@ -76,6 +76,19 @@ Upload rules: PDF only, ≤5 MB (enforced in presign *and* the S3 POST policy). 
 | `POST /users/me/cv/{cv_id}/analyze` | 🔒 | **10/hour + 50/day** | `CVAnalyzeRequest {job_id}` | `CVTaskStatusResponse` — cached `CVAnalysisResponse` inline if <24 h old, else `{task_id, status: pending}` |
 | `POST /users/me/cv/{cv_id}/tailor` | 🔒 | **10/hour + 50/day** | `{job_id}` | `CVTaskStatusResponse {task_id}` — always async |
 | `GET /users/me/cv/tasks/{task_id}` | 🔒 | 60/min | — | `CVTaskStatusResponse {status: pending\|started\|success\|failure, result?}` |
+
+### CV curation & document export (2026-07-11)
+
+Full-CV rewrite with a **human review gate**: curate → draft in `review` → edit → approve → DOCX+PDF rendered → download. Draft statuses: `generating → review → approved → rendered | failed | superseded`.
+
+| Method & path | Auth | Limit | Request | Response |
+|---|---|---|---|---|
+| `POST /users/me/cv/{cv_id}/curate` | 🔒 | **10/hour + 50/day** | `{job_id}` | **202** `{task_id, draft_id, status}` — supersedes any live draft for the same (cv, job); poll the task, then fetch the draft |
+| `GET /users/me/cv/drafts` | 🔒 | — | — | `list[CVDraftResponse]` (newest first, superseded excluded) |
+| `GET /users/me/cv/drafts/{draft_id}` | 🔒 | — | — | `CVDraftResponse` — `content = {original, tailored, keywords_injected}` once in `review` |
+| `PATCH /users/me/cv/drafts/{draft_id}` | 🔒 | — | `{tailored: CVStructure}` | `CVDraftResponse` — user edits; **409** unless status is `review` |
+| `POST /users/me/cv/drafts/{draft_id}/approve` | 🔒 | — | — | **202** `{task_id}` — `FOR UPDATE`-guarded; enqueues DOCX+PDF rendering |
+| `GET /users/me/cv/drafts/{draft_id}/download?format=docx\|pdf` | 🔒 | — | — | `CVDraftDownloadResponse` (presigned GET, 1 h); **409** until `rendered` |
 | `GET /users/me/ai-usage` | 🔒 | — | — | `AIUsageResponse {used, limit, remaining, warn, exhausted, resets_in_seconds}` — drives the dashboard's nearing-limit / limit-reached banner |
 
 The daily cap returns 429 `"Daily AI usage limit reached. Try again tomorrow."` — it's a Redis counter separate from the hourly slowapi limit. Clients poll task status every ~2 s until terminal.
@@ -84,12 +97,13 @@ The daily cap returns 429 `"Daily AI usage limit reached. Try again tomorrow."` 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| `GET /jobs/` | 🔒 | Query: `role`, `location`, `location_type`, `company` (repeatable), `days_ago`, `page`, `limit` | `PaginatedResponse[JobListItem]` — each item annotated with the caller's `saved`/`applied` |
+| `GET /jobs/` | 🔒 | Query: `role`, `location`, `location_type`, `company` (repeatable), `days_ago`, `validation_status` (👑 admin-only, e.g. `suspect`), `page`, `limit` | `PaginatedResponse[JobListItem]` — each item annotated with the caller's `saved`/`applied` + `validation_status`. `dead` jobs excluded by default |
+| `GET /jobs/recommended` | 🔒 | Query: `page`, `limit` | `PaginatedResponse[RecommendedJob]` — jobs ranked by weighted overlap of the caller's CV skills with `job_skills`; each item adds `match_score` (0–100) + `matched_skills[]`. Empty when the user has no extracted skills |
 | `GET /jobs/saved` | 🔒 | Query: `page`, `limit` | `PaginatedResponse[JobListItem]` — jobs the caller has saved |
 | `GET /jobs/{job_id}` | 🔒 | — | `JobDetail` (adds description, seniority, salary, skills, timestamps, `saved`/`applied`) |
 | `PUT /jobs/{job_id}/saved` | 🔒 | `{saved: bool}` | `JobInteractionResponse {job_id, saved, applied}` — toggle saved |
 | `PUT /jobs/{job_id}/applied` | 🔒 | `{applied: bool}` | `JobInteractionResponse` — toggle applied (sets `applied_at`) |
-| `GET /jobs/{job_id}/skill-gap` | 🔒 | — | `SkillGapResponse {matched: SkillMatch[], missing: MissingSkill[], partial: PartialSkill[]}` — user skills vs job requirements |
+| `GET /jobs/{job_id}/skill-gap` | 🔒 | — | `SkillGapResponse {matched: SkillMatch[], missing: MissingSkill[], partial: PartialSkill[]}` — user skills vs job requirements (now non-trivial: `job_skills` are populated at ingest since 2026-07-11) |
 
 ## Companies — [`routes/companies.py`](../app/api/routes/companies.py) (prefix `/companies`)
 
